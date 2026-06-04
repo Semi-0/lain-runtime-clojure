@@ -1,5 +1,12 @@
 # Core Runtime Model
 
+The runtime implements **networked semantics** (feature 1) and **fixpoint
+evaluation** (feature 2) from [Four Core Features](four-core-features.md).
+**Partial information** (feature 3) is domain-specific via `cell-merge` /
+`strongest-value`. **Dependence tracking** (feature 4) is **not** part of
+`eval-propagator` or `eval-cell` (MIT-shaped: a separate subsystem wired only at
+**`cell-merge`** when messages are absorbed). It is not implemented yet.
+
 Source files:
 
 - `propagators/graph.clj`
@@ -103,10 +110,12 @@ task queue -> eval-propagator -> messages -> eval-cells -> maybe enqueue outputs
 
 `eval-cell`:
 
-1. merges the update into cell content
+1. merges the update into cell content via **`merge/cell-merge`**
 2. computes strongest
 3. stores the new cell
 4. if strongest changed, enqueues downstream propagators
+
+Dependence tracking (when it exists) attaches at step 1 inside **`cell-merge`**, not in the scheduler loop above.
 
 Task queue entries are propagator node ids. Message targets are cell node ids.
 
@@ -147,8 +156,8 @@ immaterial at quiescence; flush **placement** is not — see
 ## Current Limits
 
 - contradiction handling is still a stub
-- dependence tracking is not implemented
-- backtracking is not implemented
+- dependence tracking is not implemented (intended hook: `cell-merge` only)
+- backtracking is not implemented (depends on merge-time dependence subsystem)
 - richer domains need explicit `cell-merge` and `strongest-value` methods
 
 The design favors explicit data flow over hidden runtime mutation. That makes
