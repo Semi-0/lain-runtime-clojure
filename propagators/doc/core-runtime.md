@@ -129,6 +129,12 @@ The compiler is closer to MIT-style install-time expansion for primitive
 networks: it adds cells and propagators to one flat graph/env. Compound forms are
 not yet part of this compiler surface.
 
+`propagators.builder-policy/*builder-policy*` (`:lazy` default, `:queue` optional)
+controls whether compile install/seed only wire topology or enqueue tasks drained
+at `(do …)` and `eval-net` flush boundaries. Scheduler order should still be
+immaterial at quiescence; flush **placement** is not — see
+[Builder Policy, Run Order, and Correctness](builder-policy-run-order-and-correctness.md).
+
 ## Assumptions
 
 - graph nodes must be installed before edges are wired
