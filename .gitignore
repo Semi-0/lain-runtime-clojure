@@ -5,4 +5,3 @@ leapfrog-rs/target/
 .lsp/
 .DS_Store
 better-layering/
-propagators/compile-2.clj
