@@ -19,6 +19,7 @@
             [propagators.datastructures.behavior-algebra :as hist]
             [propagators.datastructures.compound-object :as obj]
             [propagators.datastructures.dependency :as dependency]
+            [propagators.datastructures.scope-source :as scope-source]
             [propagators.ids :as ids]
             [propagators.message :refer [message]]
             [propagators.network :as net]
@@ -43,6 +44,12 @@
   (-> net/empty-net
       (compile/install-and-run (protocol/install-cell-protocol))
       (compile/install-and-run (protocol/install-behavior-protocol))))
+
+(defn- scope-source-protocol-net
+  []
+  (-> net/empty-net
+      (compile/install-and-run (protocol/install-cell-protocol))
+      (compile/install-and-run (protocol/install-scope-source-protocol))))
 
 (defn- behavior-view
   [records source-keys]
@@ -78,6 +85,14 @@
     (if (value/unusable? v)
       v
       (behavior/base-value v))))
+
+(defn- scoped-base
+  [v]
+  (scope-source/base-value v))
+
+(defn- install-empty-cells
+  [n ids]
+  (reduce nb/install-cell n ids))
 
 (defn- seed-behavior-message
   [n id v]
@@ -302,6 +317,92 @@
       (is (= :cell (:binding/type binding)))
       (is (= child-id (:binding/id binding))))))
 
+(deftest compile-2-lexical-access-preserves-scope-source-content
+  (testing "lexical access copies all scoped candidates and lets cell strongest choose"
+    (let [parent-id (ids/new-node-id)
+          child-id (ids/new-node-id)
+          env-id (ids/new-node-id)
+          out-id (ids/new-node-id)
+          lexical-env (-> (default-env)
+                          (env/bind 'x (env/cell-binding parent-id) 0)
+                          env/enter-scope
+                          (env/bind 'x (env/cell-binding child-id)))
+          n0 (-> (scope-source-protocol-net)
+                 (install-empty-cells [env-id out-id])
+                 (nb/seed-cell env-id lexical-env))
+          [access-prop n1] ((env/p:lexical-access 'x env-id out-id) n0)
+          n2 (nb/run-propagators n1 [access-prop])
+          content (net/network-cell-content n2 out-id)
+          selected (strongest n2 out-id)]
+      (is (scope-source/scope-content? content))
+      (is (= 2 (count (scope-source/content-candidates content))))
+      (is (scope-source/scope-value? selected))
+      (is (= child-id (:binding/id (scoped-base selected)))))))
+
+(deftest compile-2-lexical-access-conflict-belongs-to-cell-strongest
+  (testing "equal-nearest scoped candidates are received intact and strongest contradicts"
+    (let [left-id (ids/new-node-id)
+          right-id (ids/new-node-id)
+          env-id (ids/new-node-id)
+          out-id (ids/new-node-id)
+          chain [:root :child]
+          left (scope-source/scope-value :child
+                                         :child
+                                         chain
+                                         (env/cell-binding left-id))
+          right (scope-source/scope-value :child
+                                          :child
+                                          chain
+                                          (env/cell-binding right-id))
+          env-value (obj/compound-object
+                     {'x (scope-source/merge-content left right)})
+          n0 (-> (scope-source-protocol-net)
+                 (install-empty-cells [env-id out-id])
+                 (nb/seed-cell env-id env-value))
+          [access-prop n1] ((env/p:lexical-access 'x env-id out-id) n0)
+          n2 (nb/run-propagators n1 [access-prop])
+          content (net/network-cell-content n2 out-id)]
+      (is (= 2 (count (scope-source/content-candidates content))))
+      (is (= value/contradiction (strongest n2 out-id))))))
+
+(deftest compile-2-lexical-access-retains-non-ancestor-candidates
+  (testing "non-ancestor candidates remain content but are not strongest"
+    (let [env-id (ids/new-node-id)
+          out-id (ids/new-node-id)
+          unrelated (scope-source/scope-value :other
+                                              :child
+                                              [:root :child]
+                                              (env/cell-binding
+                                               (ids/new-node-id)))
+          env-value (obj/compound-object {'x unrelated})
+          n0 (-> (scope-source-protocol-net)
+                 (install-empty-cells [env-id out-id])
+                 (nb/seed-cell env-id env-value))
+          [access-prop n1] ((env/p:lexical-access 'x env-id out-id) n0)
+          n2 (nb/run-propagators n1 [access-prop])
+          content (net/network-cell-content n2 out-id)]
+      (is (= 1 (count (scope-source/content-candidates content))))
+      (is (= value/nothing (strongest n2 out-id))))))
+
+(deftest compile-2-lexical-access-reads-accessor-backed-env-slot
+  (testing "lexical access can read an accessor source slot without materializing env"
+    (let [binding-id (ids/new-node-id)
+          env-id (ids/new-node-id)
+          out-id (ids/new-node-id)
+          candidate (scope-source/scope-value :root
+                                              :root
+                                              [:root]
+                                              (env/cell-binding binding-id))
+          accessor-env (obj/as-accessor-network {'x candidate})
+          n0 (-> (scope-source-protocol-net)
+                 (install-empty-cells [env-id out-id])
+                 (nb/seed-cell env-id accessor-env))
+          [access-prop n1] ((env/p:lexical-access 'x env-id out-id) n0)
+          n2 (nb/run-propagators n1 [access-prop])
+          selected (strongest n2 out-id)]
+      (is (scope-source/scope-value? selected))
+      (is (= binding-id (:binding/id (scoped-base selected)))))))
+
 (deftest compile-2-network-env-ops-build-scoped-compound-env
   (testing "scope propagators receive parent env one-way and bind locals into a fresh child env"
     (let [parent-x-id (ids/new-node-id)
@@ -359,11 +460,12 @@
                        (add-bias 5))"
                     env
                     {:net base-net})
-          declarations (obj/slot-declarations (:net compiled))
           apply-inputs (propagator-inputs-writing-to (:net compiled)
                                                      (:cell compiled))
-          result-net (run-compiled compiled)]
-      (is (some #(contains? % main/closure-env-slot) (vals declarations)))
+          result-net (run-compiled compiled)
+          declarations (map #(obj/accessor-declarations-for result-net %)
+                            (keys (net/net-env result-net)))]
+      (is (some #(contains? % main/closure-env-slot) declarations))
       (is (not-any? #(contains? % bias-id) apply-inputs))
       (is (= 15 (strongest result-net (:cell compiled)))))))
 
