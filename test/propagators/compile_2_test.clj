@@ -1,5 +1,6 @@
 (ns propagators.compile-2-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [clojure.string :as str]
+            [clojure.test :refer [deftest is testing]]
             [propagators.cells.cell-protocol :as protocol]
             [propagators.cells.value :as value]
             [propagators.closure :as closure]
@@ -113,6 +114,15 @@
                       (nb/ensure-cell n slot-id))
         n2 (nb/run-propagators n1 [prop-id])]
     [(strongest n2 slot-id) n2]))
+
+(defn- bi-sync-chain-source
+  [length]
+  (let [cells (map #(str "c" %) (range (inc length)))
+        links (map #(format "(<-> c%d c%d)" % (inc %)) (range length))]
+    (str "(let-cell [" (str/join " " cells) "] "
+         "(<-> c0 1) "
+         (str/join " " links)
+         " c" length ")")))
 
 (defn- seed-behavior-message
   [n id v]
@@ -370,6 +380,51 @@
       (is (= 5 anon-next))
       (is (= 5 named-same))
       (is (= 6 named-next)))))
+
+(deftest compile-2-multi-output-survives-nested-closure-application
+  (testing "an outer closure can return an inner multi-output application object"
+    (let [compiled (compile-source
+                    "(let-cell [scratch]
+                       (def-net pair [x] [same next]
+                         (<-> x same)
+                         (<-> (+ x 1) next))
+                       (def-net outer [x] [wrapped]
+                         (pair x))
+                       (outer 8))")
+          result-net (run-compiled compiled)
+          [same n1] (read-slot result-net (:cell compiled) 'same)
+          [next _] (read-slot n1 (:cell compiled) 'next)]
+      (is (= 8 same))
+      (is (= 9 next)))))
+
+(deftest compile-2-multi-output-late-bound-closure-application
+  (testing "an application installed before the operator closure receives multi-output slots later"
+    (let [compiled (compile-source "(let-cell [some-net out]
+                                      (<-> out (some-net 2))
+                                      out)")
+          some-net-id (:binding/id (env/lookup (:env compiled) 'some-net))
+          out-id (:binding/id (env/lookup (:env compiled) 'out))
+          closure-compiled (compile-source
+                            "(network [x] [same next]
+                               (<-> x same)
+                               (<-> (+ x 1) next))")
+          closure-value (strongest (:net closure-compiled)
+                                   (:cell closure-compiled))
+          n0 (run-compiled compiled)
+          n1 (nb/seed-cell n0 some-net-id closure-value)
+          n2 (nb/run-propagators n1
+                                 (nb/neighbor-propagator-ids n1 some-net-id))
+          [same n3] (read-slot n2 out-id 'same)
+          [next _] (read-slot n3 out-id 'next)]
+      (is (= value/nothing (strongest n0 out-id)))
+      (is (= 2 same))
+      (is (= 3 next)))))
+
+(deftest compile-2-bi-sync-chain-100
+  (testing "compiler-2 handles a 100-hop <-> chain"
+    (let [compiled (compile-source (bi-sync-chain-source 100))
+          result-net (run-compiled compiled)]
+      (is (= 1 (strongest result-net (:cell compiled)))))))
 
 (deftest compile-2-env-lookup-uses-nearest-scope-source-shadowing
   (testing "a child frame binding shadows a parent frame binding"
