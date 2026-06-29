@@ -90,6 +90,12 @@
   [v]
   (scope-source/base-value v))
 
+(defn- scoped-candidate-count
+  [content]
+  (if (scope-source/scope-content? content)
+    (count (scope-source/content-candidates content))
+    0))
+
 (defn- install-empty-cells
   [n ids]
   (reduce nb/install-cell n ids))
@@ -99,6 +105,14 @@
   (if (sequential? installed-id)
     (vec installed-id)
     [installed-id]))
+
+(defn- read-slot
+  [n coll-id slot-key]
+  (let [slot-id (ids/new-node-id)
+        [prop-id n1] ((obj/p:slot slot-key slot-id coll-id)
+                      (nb/ensure-cell n slot-id))
+        n2 (nb/run-propagators n1 [prop-id])]
+    [(strongest n2 slot-id) n2]))
 
 (defn- seed-behavior-message
   [n id v]
@@ -312,7 +326,7 @@
       (is (= 5 (strongest result-net (:cell compiled)))))))
 
 (deftest compile-2-env-lookup-uses-nearest-scope-source-shadowing
-  (testing "a child binding with a nearer scope source is selected from the compound env"
+  (testing "a child frame binding shadows a parent frame binding"
     (let [parent-id (ids/new-node-id)
           child-id (ids/new-node-id)
           env (-> (default-env)
@@ -323,8 +337,48 @@
       (is (= :cell (:binding/type binding)))
       (is (= child-id (:binding/id binding))))))
 
-(deftest compile-2-lexical-access-preserves-scope-source-content
-  (testing "lexical access copies all scoped candidates and lets cell strongest choose"
+(deftest compile-2-env-extension-builds-frame-parent-and-chain
+  (testing "child frames keep parent links and extend the parent chain"
+    (let [parent (default-env)
+          child (env/sub-env parent)
+          sibling (env/sub-env parent)]
+      (is (= parent (obj/slot-value child env/env-parent-key)))
+      (is (= (conj (env/scope-chain parent) (env/scope-id child))
+             (env/scope-chain child)))
+      (is (= #{} (env/local-bindings child)))
+      (is (not= (env/scope-id child) (env/scope-id sibling))))))
+
+(deftest compile-2-p-sub-env-uses-stable-child-scope
+  (testing "one child env cell keeps the same derived scope across parent updates"
+    (let [late-id (ids/new-node-id)
+          parent-env-id (ids/new-node-id)
+          child-env-id (ids/new-node-id)
+          parent-env (default-env)
+          parent-env-with-late (env/bind parent-env
+                                         'late
+                                         (env/cell-binding late-id)
+                                         0)
+          n0 (-> (scope-source-protocol-net)
+                 (install-empty-cells [parent-env-id child-env-id])
+                 (nb/seed-cell parent-env-id parent-env))
+          [sub-prop n1] ((env/p:sub-env parent-env-id child-env-id) n0)
+          n2 (nb/run-propagators n1 (installed-prop-ids sub-prop))
+          [first-scope n2*] (read-slot n2 child-env-id env/env-scope-key)
+          [first-bindings n2**] (read-slot n2* child-env-id env/env-local-bindings-key)
+          n3 (nb/seed-cell n2 parent-env-id parent-env-with-late)
+          n4 (nb/run-propagators n3
+                                 (nb/neighbor-propagator-ids n3 parent-env-id))
+          [updated-scope n4*] (read-slot n4 child-env-id env/env-scope-key)
+          [updated-chain _] (read-slot n4* child-env-id env/env-scope-chain-key)]
+      (is (= [:env/child child-env-id] first-scope))
+      (is (= #{} first-bindings))
+      (is (= first-scope updated-scope))
+      (is (= (conj (env/scope-chain parent-env)
+                   [:env/child child-env-id])
+             updated-chain)))))
+
+(deftest compile-2-lexical-access-emits-frame-scope-candidates
+  (testing "lexical access emits only the nearest declared frame candidate"
     (let [parent-id (ids/new-node-id)
           child-id (ids/new-node-id)
           env-id (ids/new-node-id)
@@ -341,73 +395,42 @@
           content (net/network-cell-content n2 out-id)
           selected (strongest n2 out-id)]
       (is (scope-source/scope-content? content))
-      (is (= 2 (count (scope-source/content-candidates content))))
+      (is (= 1 (scoped-candidate-count content)))
       (is (scope-source/scope-value? selected))
       (is (= child-id (:binding/id (scoped-base selected)))))))
 
 (deftest compile-2-lexical-access-conflict-belongs-to-cell-strongest
-  (testing "equal-nearest scoped candidates are received intact and strongest contradicts"
+  (testing "equal-nearest candidates still contradict in scope-source cell semantics"
     (let [left-id (ids/new-node-id)
           right-id (ids/new-node-id)
-          env-id (ids/new-node-id)
+          source-id (ids/new-node-id)
+          chain-id (ids/new-node-id)
+          left-value-id (ids/new-node-id)
+          right-value-id (ids/new-node-id)
           out-id (ids/new-node-id)
-          chain [:root :child]
-          left (scope-source/scope-value :child
-                                         :child
-                                         chain
-                                         (env/cell-binding left-id))
-          right (scope-source/scope-value :child
-                                          :child
-                                          chain
-                                          (env/cell-binding right-id))
-          env-value (obj/compound-object
-                     {'x (scope-source/merge-content left right)})
           n0 (-> (scope-source-protocol-net)
-                 (install-empty-cells [env-id out-id])
-                 (nb/seed-cell env-id env-value))
-          [access-prop n1] ((env/p:lexical-access 'x env-id out-id) n0)
-          n2 (nb/run-propagators n1 (installed-prop-ids access-prop))
-          content (net/network-cell-content n2 out-id)]
-      (is (= 2 (count (scope-source/content-candidates content))))
-      (is (= value/contradiction (strongest n2 out-id))))))
-
-(deftest compile-2-lexical-access-retains-non-ancestor-candidates
-  (testing "non-ancestor candidates remain content but are not strongest"
-    (let [env-id (ids/new-node-id)
-          out-id (ids/new-node-id)
-          unrelated (scope-source/scope-value :other
-                                              :child
-                                              [:root :child]
-                                              (env/cell-binding
-                                               (ids/new-node-id)))
-          env-value (obj/compound-object {'x unrelated})
-          n0 (-> (scope-source-protocol-net)
-                 (install-empty-cells [env-id out-id])
-                 (nb/seed-cell env-id env-value))
-          [access-prop n1] ((env/p:lexical-access 'x env-id out-id) n0)
-          n2 (nb/run-propagators n1 (installed-prop-ids access-prop))
-          content (net/network-cell-content n2 out-id)]
-      (is (= 1 (count (scope-source/content-candidates content))))
-      (is (= value/nothing (strongest n2 out-id))))))
-
-(deftest compile-2-lexical-access-reads-accessor-backed-env-slot
-  (testing "lexical access can read an accessor source slot without materializing env"
-    (let [binding-id (ids/new-node-id)
-          env-id (ids/new-node-id)
-          out-id (ids/new-node-id)
-          candidate (scope-source/scope-value :root
-                                              :root
-                                              [:root]
-                                              (env/cell-binding binding-id))
-          accessor-env (obj/as-accessor-network {'x candidate})
-          n0 (-> (scope-source-protocol-net)
-                 (install-empty-cells [env-id out-id])
-                 (nb/seed-cell env-id accessor-env))
-          [access-prop n1] ((env/p:lexical-access 'x env-id out-id) n0)
-          n2 (nb/run-propagators n1 (installed-prop-ids access-prop))
-          selected (strongest n2 out-id)]
-      (is (scope-source/scope-value? selected))
-      (is (= binding-id (:binding/id (scoped-base selected)))))))
+                 (install-empty-cells [source-id
+                                       chain-id
+                                       left-value-id
+                                       right-value-id
+                                       out-id])
+                 (nb/seed-cell source-id :child)
+                 (nb/seed-cell chain-id [:root :child])
+                 (nb/seed-cell left-value-id (env/cell-binding left-id))
+                 (nb/seed-cell right-value-id (env/cell-binding right-id)))
+          [left-prop n1] ((scope-source/p:scope-value source-id
+                                                      chain-id
+                                                      left-value-id
+                                                      out-id)
+                          n0)
+          [right-prop n2] ((scope-source/p:scope-value source-id
+                                                       chain-id
+                                                       right-value-id
+                                                       out-id)
+                           n1)]
+      (is (= value/contradiction
+             (strongest (nb/run-propagators n2 [left-prop right-prop])
+                        out-id))))))
 
 (deftest compile-2-network-env-ops-build-scoped-compound-env
   (testing "scope propagators receive parent env one-way and bind locals into a fresh child env"
@@ -418,18 +441,18 @@
           inherited-env-id (ids/new-node-id)
           local-binding-id (ids/new-node-id)
           scoped-env-id (ids/new-node-id)
-          parent-env (env/bind (default-env)
-                               'x
-                               (env/cell-binding parent-x-id)
-                               0)
-          parent-env-with-y (env/bind parent-env
-                                      'y
-                                      (env/cell-binding parent-y-id)
-                                      0)
-          n0 (-> (nb/install-cells [parent-env-id
-                                    inherited-env-id
-                                    local-binding-id
-                                    scoped-env-id])
+          parent-env (-> (default-env)
+                         (env/bind 'x
+                                   (env/cell-binding parent-x-id)
+                                   0)
+                         (env/bind 'y
+                                   (env/cell-binding parent-y-id)
+                                   0))
+          n0 (-> (scope-source-protocol-net)
+                 (install-empty-cells [parent-env-id
+                                       inherited-env-id
+                                       local-binding-id
+                                       scoped-env-id])
                  (nb/seed-cell parent-env-id parent-env)
                  (nb/seed-cell local-binding-id
                                (env/cell-binding local-x-id)))
@@ -440,45 +463,70 @@
                            local-binding-id
                            scoped-env-id)
                           n1)
-          n3 (nb/run-propagators n2 [sub-prop bind-prop])
-          inherited-env (strongest n3 inherited-env-id)
-          scoped-env (strongest n3 scoped-env-id)
-          n4 (nb/seed-cell n3 parent-env-id parent-env-with-y)
-          n5 (nb/run-propagators n4
-                                 (nb/neighbor-propagator-ids n4 parent-env-id))
-          scoped-env-after-parent-update (strongest n5 scoped-env-id)]
-      (is (= parent-x-id (:binding/id (env/lookup inherited-env 'x))))
-      (is (= local-x-id (:binding/id (env/lookup scoped-env 'x))))
-      (is (= local-x-id
-             (:binding/id (env/lookup scoped-env-after-parent-update 'x))))
-      (is (= parent-y-id
-             (:binding/id (env/lookup scoped-env-after-parent-update 'y)))))))
+          n3 (nb/run-propagators n2
+                                 (into (installed-prop-ids sub-prop)
+                                       (installed-prop-ids bind-prop)))
+          inherited-x-id (ids/new-node-id)
+          scoped-x-id (ids/new-node-id)
+          scoped-y-id (ids/new-node-id)
+          [inherited-access n4] ((env/p:lexical-access 'x
+                                                       inherited-env-id
+                                                       inherited-x-id)
+                                 n3)
+          [scoped-x-access n5] ((env/p:lexical-access 'x
+                                                     scoped-env-id
+                                                     scoped-x-id)
+                               n4)
+          [scoped-y-access n6] ((env/p:lexical-access 'y
+                                                     scoped-env-id
+                                                     scoped-y-id)
+                               n5)
+          n7 (nb/run-propagators n6
+                                 (into (into (installed-prop-ids inherited-access)
+                                             (installed-prop-ids scoped-x-access))
+                                       (installed-prop-ids scoped-y-access)))
+          n8 (nb/seed-cell n7 parent-y-id :parent-y-ready)]
+      (is (= parent-x-id (:binding/id (scoped-base (strongest n7 inherited-x-id)))))
+      (is (= local-x-id (:binding/id (scoped-base (strongest n7 scoped-x-id)))))
+      (is (= 1 (scoped-candidate-count (net/network-cell-content n7 scoped-x-id))))
+      (is (= local-x-id (:binding/id (scoped-base (strongest n8 scoped-x-id)))))
+      (is (= 1 (scoped-candidate-count (net/network-cell-content n8 scoped-x-id))))
+      (is (= parent-y-id (:binding/id (scoped-base (strongest n8 scoped-y-id))))))))
 
 (deftest compile-2-lexical-access-sees-late-parent-binding
-  (testing "a lexical accessor installed before a parent binding wakes after the child env updates"
+  (testing "a lexical accessor installed before a parent binding payload wakes after the payload arrives"
     (let [late-id (ids/new-node-id)
           parent-env-id (ids/new-node-id)
+          parent-binding-id (ids/new-node-id)
+          bound-parent-env-id (ids/new-node-id)
           child-env-id (ids/new-node-id)
           out-id (ids/new-node-id)
           parent-env (default-env)
-          parent-env-with-late (env/bind parent-env
-                                         'late
-                                         (env/cell-binding late-id)
-                                         0)
           n0 (-> (scope-source-protocol-net)
-                 (install-empty-cells [parent-env-id child-env-id out-id])
+                 (install-empty-cells [parent-env-id
+                                       parent-binding-id
+                                       bound-parent-env-id
+                                       child-env-id
+                                       out-id])
                  (nb/seed-cell parent-env-id parent-env))
-          [sub-prop n1] ((env/p:sub-env parent-env-id child-env-id) n0)
-          [access-prop n2] ((env/p:lexical-access 'late child-env-id out-id)
-                            n1)
-          n3 (nb/run-propagators n2
-                                 (into [sub-prop]
+          [bind-prop n1] ((env/p:bind-local
+                           'late
+                           parent-env-id
+                           parent-binding-id
+                           bound-parent-env-id)
+                          n0)
+          [sub-prop n2] ((env/p:sub-env bound-parent-env-id child-env-id) n1)
+          [access-prop n3] ((env/p:lexical-access 'late child-env-id out-id)
+                            n2)
+          n4 (nb/run-propagators n3
+                                 (into (into (installed-prop-ids bind-prop)
+                                             (installed-prop-ids sub-prop))
                                        (installed-prop-ids access-prop)))
-          n4 (nb/seed-cell n3 parent-env-id parent-env-with-late)
-          n5 (nb/run-propagators n4
-                                 (nb/neighbor-propagator-ids n4 parent-env-id))
-          selected (strongest n5 out-id)]
-      (is (= value/nothing (strongest n3 out-id)))
+          n5 (nb/seed-cell n4 parent-binding-id (env/cell-binding late-id))
+          n6 (nb/run-propagators n5
+                                 (nb/neighbor-propagator-ids n5 parent-binding-id))
+          selected (strongest n6 out-id)]
+      (is (= value/nothing (strongest n4 out-id)))
       (is (scope-source/scope-value? selected))
       (is (= late-id (:binding/id (scoped-base selected)))))))
 
@@ -515,17 +563,65 @@
           [access-prop n3] ((env/p:lexical-access 'x scoped-env-id out-id)
                             n2)
           n4 (nb/run-propagators n3
-                                 (into [sub-prop bind-prop]
+                                 (into (into (installed-prop-ids sub-prop)
+                                             (installed-prop-ids bind-prop))
                                        (installed-prop-ids access-prop)))
           n5 (nb/seed-cell n4 parent-env-id parent-env-later)
           n6 (nb/run-propagators n5
                                  (nb/neighbor-propagator-ids n5 parent-env-id))
           before-update (strongest n4 out-id)
-          after-update (strongest n6 out-id)]
+          after-update (strongest n6 out-id)
+          before-content (net/network-cell-content n4 out-id)
+          after-content (net/network-cell-content n6 out-id)]
       (is (scope-source/scope-value? before-update))
       (is (= child-x-id (:binding/id (scoped-base before-update))))
+      (is (= 1 (scoped-candidate-count before-content)))
       (is (scope-source/scope-value? after-update))
+      (is (= 1 (scoped-candidate-count after-content)))
       (is (= child-x-id (:binding/id (scoped-base after-update)))))))
+
+(deftest compile-2-lexical-access-does-not-leak-parent-before-child-value
+  (testing "child declaration metadata blocks parent traversal before the child value arrives"
+    (let [parent-x-id (ids/new-node-id)
+          child-x-id (ids/new-node-id)
+          parent-env-id (ids/new-node-id)
+          inherited-env-id (ids/new-node-id)
+          child-binding-id (ids/new-node-id)
+          scoped-env-id (ids/new-node-id)
+          out-id (ids/new-node-id)
+          parent-env (env/bind (default-env)
+                               'x
+                               (env/cell-binding parent-x-id)
+                               0)
+          n0 (-> (scope-source-protocol-net)
+                 (install-empty-cells [parent-env-id
+                                       inherited-env-id
+                                       child-binding-id
+                                       scoped-env-id
+                                       out-id])
+                 (nb/seed-cell parent-env-id parent-env))
+          [sub-prop n1] ((env/p:sub-env parent-env-id inherited-env-id) n0)
+          [bind-prop n2] ((env/p:bind-local
+                           'x
+                           inherited-env-id
+                           child-binding-id
+                           scoped-env-id)
+                          n1)
+          [access-prop n3] ((env/p:lexical-access 'x scoped-env-id out-id)
+                            n2)
+          n4 (nb/run-propagators n3
+                                 (into (into (installed-prop-ids sub-prop)
+                                             (installed-prop-ids bind-prop))
+                                       (installed-prop-ids access-prop)))
+          n5 (nb/seed-cell n4 child-binding-id (env/cell-binding child-x-id))
+          n6 (nb/run-propagators n5
+                                 (nb/neighbor-propagator-ids n5 child-binding-id))
+          selected (strongest n6 out-id)]
+      (is (= value/nothing (strongest n4 out-id)))
+      (is (= 0 (scoped-candidate-count (net/network-cell-content n4 out-id))))
+      (is (scope-source/scope-value? selected))
+      (is (= child-x-id (:binding/id (scoped-base selected))))
+      (is (= 1 (scoped-candidate-count (net/network-cell-content n6 out-id)))))))
 
 (deftest compile-2-lexical-compound-uses-env-slot-not-hidden-captures
   (testing "compound declarations attach lexical env through slots, not hidden application inputs"
