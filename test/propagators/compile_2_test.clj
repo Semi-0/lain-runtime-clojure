@@ -277,6 +277,17 @@
                           #":: params must be a vector"
                           (parse "(:: (+ x 1))")))))
 
+(deftest compile-2-parser-supports-first-slice-network-syntax
+  (testing "network and def-net parse output vectors over the existing closure path"
+    (let [network-ast (parse "(network [x] [out] (+ x 1))")
+          def-net-ast (parse "(def-net pair [x] [same next] (+ x 1))")]
+      (is (= :compound (ast/type network-ast)))
+      (is (= '[x] (ast/inputs network-ast)))
+      (is (= '[out] (ast/output network-ast)))
+      (is (= :def-net (ast/type def-net-ast)))
+      (is (= 'pair (ast/name def-net-ast)))
+      (is (= '[same next] (ast/output def-net-ast))))))
+
 (deftest compile-2-ast-accessors-accept-old-map-asts
   (testing "old AST maps normalize into slot-backed AST objects"
     (let [expr {:ast/type :apply
@@ -324,6 +335,41 @@
              (obj/slot-value app-info main/application-lowering-slot)))
       (is (contains? (set (:props compiled)) (first apply-props)))
       (is (= 5 (strongest result-net (:cell compiled)))))))
+
+(deftest compile-2-supports-first-slice-network-and-def-net
+  (testing "network is anonymous closure syntax and def-net binds the closure cell"
+    (let [anonymous (compile-source "((network [x] [out] (+ x 1)) 4)")
+          named (compile-source "(let-cell [scratch]
+                                   (def-net inc [x] [out] (+ x 1))
+                                   (inc 5))")]
+      (is (= 5 (strongest (run-compiled anonymous) (:cell anonymous))))
+      (is (= 6 (strongest (run-compiled named) (:cell named)))))))
+
+(deftest compile-2-network-and-def-net-support-multiple-structural-outputs
+  (testing "multi-output applications expose output cells as structural slots"
+    (let [anonymous (compile-source
+                     "((network [x] [same next]
+                         (<-> x same)
+                         (<-> (+ x 1) next))
+                       4)")
+          named (compile-source
+                 "(let-cell [scratch]
+                    (def-net pair [x] [same next]
+                      (<-> x same)
+                      (<-> (+ x 1) next))
+                    (pair 5))")
+          anonymous-net (run-compiled anonymous)
+          named-net (run-compiled named)
+          [anon-same n1] (read-slot anonymous-net (:cell anonymous) 'same)
+          [anon-next _] (read-slot n1 (:cell anonymous) 'next)
+          [named-same n2] (read-slot named-net (:cell named) 'same)
+          [named-next _] (read-slot n2 (:cell named) 'next)]
+      (is (obj/accessor-network? (net/network-cell-content anonymous-net
+                                                           (:cell anonymous))))
+      (is (= 4 anon-same))
+      (is (= 5 anon-next))
+      (is (= 5 named-same))
+      (is (= 6 named-next)))))
 
 (deftest compile-2-env-lookup-uses-nearest-scope-source-shadowing
   (testing "a child frame binding shadows a parent frame binding"
