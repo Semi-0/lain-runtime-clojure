@@ -347,63 +347,73 @@
       (is (= 5 (strongest result-net (:cell compiled)))))))
 
 (deftest compile-2-supports-first-slice-network-and-def-net
-  (testing "network is anonymous closure syntax and def-net binds the closure cell"
-    (let [anonymous (compile-source "((network [x] [out] (+ x 1)) 4)")
-          named (compile-source "(let-cell [scratch]
+  (testing "network output cells are explicit application applicants"
+    (let [anonymous (compile-source "(let-cell [out]
+                                       ((network [x] [out] (+ x 1)) 4 out)
+                                       out)")
+          named (compile-source "(let-cell [out]
                                    (def-net inc [x] [out] (+ x 1))
-                                   (inc 5))")]
+                                   (inc 5 out)
+                                   out)")]
       (is (= 5 (strongest (run-compiled anonymous) (:cell anonymous))))
       (is (= 6 (strongest (run-compiled named) (:cell named)))))))
 
-(deftest compile-2-network-and-def-net-support-multiple-structural-outputs
-  (testing "multi-output applications expose output cells as structural slots"
+(deftest compile-2-network-requires-explicit-output-applicant
+  (testing "declared-output network calls do not synthesize hidden output cells"
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo
+         #"network application requires explicit output cells"
+         (compile-source "((network [x] [out] (+ x 1)) 4)")))))
+
+(deftest compile-2-cell-expression-returns-body-result
+  (testing "cell is the zero-output closure form for expression results"
+    (let [compiled (compile-source "((cell [x] (+ x 1)) 4)")
+          result-net (run-compiled compiled)]
+      (is (= 5 (strongest result-net (:cell compiled)))))))
+
+(deftest compile-2-network-and-def-net-support-multiple-explicit-outputs
+  (testing "multi-output applications write to explicit output cells"
     (let [anonymous (compile-source
-                     "((network [x] [same next]
-                         (<-> x same)
-                         (<-> (+ x 1) next))
-                       4)")
+                     "(let-cell [same next]
+                        ((network [x] [same next]
+                           (<-> x same)
+                           (<-> (+ x 1) next))
+                         4 same next)
+                        next)")
           named (compile-source
-                 "(let-cell [scratch]
+                 "(let-cell [same next]
                     (def-net pair [x] [same next]
                       (<-> x same)
                       (<-> (+ x 1) next))
-                    (pair 5))")
+                    (pair 5 same next)
+                    next)")
           anonymous-net (run-compiled anonymous)
-          named-net (run-compiled named)
-          [anon-same n1] (read-slot anonymous-net (:cell anonymous) 'same)
-          [anon-next _] (read-slot n1 (:cell anonymous) 'next)
-          [named-same n2] (read-slot named-net (:cell named) 'same)
-          [named-next _] (read-slot n2 (:cell named) 'next)]
-      (is (obj/accessor-network? (net/network-cell-content anonymous-net
-                                                           (:cell anonymous))))
-      (is (= 4 anon-same))
-      (is (= 5 anon-next))
-      (is (= 5 named-same))
-      (is (= 6 named-next)))))
+          named-net (run-compiled named)]
+      (is (= 5 (strongest anonymous-net (:cell anonymous))))
+      (is (= 6 (strongest named-net (:cell named)))))))
 
 (deftest compile-2-multi-output-survives-nested-closure-application
-  (testing "an outer closure can return an inner multi-output application object"
+  (testing "an outer closure can route explicit output cells through an inner network"
     (let [compiled (compile-source
-                    "(let-cell [scratch]
+                    "(let-cell [same next]
                        (def-net pair [x] [same next]
                          (<-> x same)
                          (<-> (+ x 1) next))
-                       (def-net outer [x] [wrapped]
-                         (pair x))
-                       (outer 8))")
-          result-net (run-compiled compiled)
-          [same n1] (read-slot result-net (:cell compiled) 'same)
-          [next _] (read-slot n1 (:cell compiled) 'next)]
-      (is (= 8 same))
-      (is (= 9 next)))))
+                       (def-net outer [x] [same next]
+                         (pair x same next))
+                       (outer 8 same next)
+                       next)")
+          result-net (run-compiled compiled)]
+      (is (= 9 (strongest result-net (:cell compiled)))))))
 
 (deftest compile-2-multi-output-late-bound-closure-application
-  (testing "an application installed before the operator closure receives multi-output slots later"
-    (let [compiled (compile-source "(let-cell [some-net out]
-                                      (<-> out (some-net 2))
-                                      out)")
+  (testing "a declared-output application installed before the operator closure uses explicit output cells"
+    (let [compiled (compile-source "(let-cell [some-net same next]
+                                      (some-net 2 same next)
+                                      next)")
           some-net-id (:binding/id (env/lookup (:env compiled) 'some-net))
-          out-id (:binding/id (env/lookup (:env compiled) 'out))
+          same-id (:binding/id (env/lookup (:env compiled) 'same))
+          next-id (:binding/id (env/lookup (:env compiled) 'next))
           closure-compiled (compile-source
                             "(network [x] [same next]
                                (<-> x same)
@@ -413,12 +423,10 @@
           n0 (run-compiled compiled)
           n1 (nb/seed-cell n0 some-net-id closure-value)
           n2 (nb/run-propagators n1
-                                 (nb/neighbor-propagator-ids n1 some-net-id))
-          [same n3] (read-slot n2 out-id 'same)
-          [next _] (read-slot n3 out-id 'next)]
-      (is (= value/nothing (strongest n0 out-id)))
-      (is (= 2 same))
-      (is (= 3 next)))))
+                                 (nb/neighbor-propagator-ids n1 some-net-id))]
+      (is (= value/nothing (strongest n0 next-id)))
+      (is (= 2 (strongest n2 same-id)))
+      (is (= 3 (strongest n2 next-id))))))
 
 (deftest compile-2-bi-sync-chain-100
   (testing "compiler-2 handles a 100-hop <-> chain"
@@ -956,14 +964,14 @@
 (deftest compile-2-supports-late-compound-definition
   (testing "an unresolved operator cell uses the same application propagator when it later receives a closure"
     (let [compiled (compile-source "(let-cell [some-net out]
-                                      (<-> out (some-net 2))
+                                      (some-net 2 out)
                                       out)")
           some-net-id (:binding/id (env/lookup (:env compiled) 'some-net))
           out-id (:binding/id (env/lookup (:env compiled) 'out))
           closure-compiled
           (compile-source
-           "(compound [x] out
-              (+ x 1))")
+           "(network [x] [out]
+              (<-> (+ x 1) out))")
           closure-value (strongest (:net closure-compiled)
                                    (:cell closure-compiled))
           n0 (run-compiled compiled)
@@ -976,13 +984,13 @@
 (deftest compile-2-application-before-closure-waits-for-later-input-fire
   (testing "an application can exist before the operator closure and evaluate on a later input update"
     (let [compiled (compile-source "(let-cell [some-net out]
-                                      (<-> out (some-net a))
+                                      (some-net a out)
                                       out)")
           some-net-id (:binding/id (env/lookup (:env compiled) 'some-net))
           a-id (:binding/id (env/lookup (:env compiled) 'a))
           out-id (:binding/id (env/lookup (:env compiled) 'out))
-          closure-compiled (compile-source "(compound [x] out
-                                             (+ x 1))")
+          closure-compiled (compile-source "(network [x] [out]
+                                             (<-> (+ x 1) out))")
           closure-info (strongest (:net closure-compiled)
                                   (:cell closure-compiled))
           n0 (run-compiled compiled)
