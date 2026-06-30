@@ -195,6 +195,19 @@
       (is (= #{:compiler-2/application}
              (set (map :dependency/type sources)))))))
 
+(deftest compile-2-default-arithmetic-preserves-operand-dependencies
+  (testing "raw operands stay raw, but dependency-bearing operands are not unwrapped away"
+    (let [[a-id base-net] (seeded-cell net/empty-net
+                                       (dependency/dependency-value
+                                        10
+                                        #{:outer-source}))
+          env (env/bind (default-env) 'a (env/cell-binding a-id) 0)
+          compiled (compile-source "(+ a 5)" env {:net base-net})
+          result (strongest (run-compiled compiled) (:cell compiled))]
+      (is (dependency/dependency-value? result))
+      (is (= 15 (dependency/base-value result)))
+      (is (= #{:outer-source} (dependency/sources result))))))
+
 (deftest compile-2-behavior-env-merges-same-timestamp-values
   (testing "compiled behavior arithmetic joins retained point histories"
     (let [left (behavior-view [(hist/point-record 6 2)] #{[:a 6]})
@@ -298,6 +311,24 @@
       (is (= 'pair (ast/name def-net-ast)))
       (is (= '[same next] (ast/output def-net-ast))))))
 
+(deftest compile-2-parser-supports-def-and-def-cell
+  (testing "def binds an expression, def-cell binds a zero-output closure"
+    (let [def-ast (parse "(def answer (+ 1 2))")
+          free-def-ast (parse "(def signal)")
+          closure-cell-ast (parse "(def-cell inc [x] (+ x 1))")]
+      (is (= :def (ast/type def-ast)))
+      (is (= 'answer (ast/name def-ast)))
+      (is (= :apply (ast/type (ast/body def-ast))))
+      (is (= :def (ast/type free-def-ast)))
+      (is (= 'signal (ast/name free-def-ast)))
+      (is (nil? (ast/body free-def-ast)))
+      (is (= :def-cell (ast/type closure-cell-ast)))
+      (is (= '[x] (ast/inputs closure-cell-ast)))
+      (is (= :apply (ast/type (ast/body closure-cell-ast)))))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                          #"def-cell expects a name, input vector, and body"
+                          (parse "(def-cell signal)")))))
+
 (deftest compile-2-ast-accessors-accept-old-map-asts
   (testing "old AST maps normalize into slot-backed AST objects"
     (let [expr {:ast/type :apply
@@ -357,6 +388,24 @@
                                    out)")]
       (is (= 5 (strongest (run-compiled anonymous) (:cell anonymous))))
       (is (= 6 (strongest (run-compiled named) (:cell named)))))))
+
+(deftest compile-2-supports-def-and-def-cell
+  (testing "def creates named cells, and def-cell names zero-output closures"
+    (let [named-value (compile-source "(def answer (+ 1 2))")
+          named-value-net (run-compiled named-value)
+          answer-id (:binding/id (env/lookup (:env named-value) 'answer))
+          free-def (compile-source "(def signal)")
+          signal-id (:binding/id (env/lookup (:env free-def) 'signal))
+          named-cell (compile-source "(let-cell [out]
+                                        (def-cell inc [x] (+ x 1))
+                                        (<-> (inc 4) out)
+                                        out)")
+          named-cell-net (run-compiled named-cell)]
+      (is (= (:cell named-value) answer-id))
+      (is (= 3 (strongest named-value-net answer-id)))
+      (is (= (:cell free-def) signal-id))
+      (is (= value/nothing (strongest (:net free-def) signal-id)))
+      (is (= 5 (strongest named-cell-net (:cell named-cell)))))))
 
 (deftest compile-2-network-requires-explicit-output-applicant
   (testing "declared-output network calls do not synthesize hidden output cells"
@@ -427,6 +476,27 @@
       (is (= value/nothing (strongest n0 next-id)))
       (is (= 2 (strongest n2 same-id)))
       (is (= 3 (strongest n2 next-id))))))
+
+(deftest compile-2-application-output-adapter-is-not-materializing
+  (testing "closure application projects result cells without a materialization helper"
+    (let [source (slurp "propagators/compiler_2/application.clj")
+          direct (compile-source "((:: [x] (+ x 1)) 4)")
+          late (compile-source "(let-cell [some-net out]
+                                 (some-net 4 out)
+                                 out)")
+          some-net-id (:binding/id (env/lookup (:env late) 'some-net))
+          out-id (:binding/id (env/lookup (:env late) 'out))
+          closure-compiled (compile-source "(network [x] [out]
+                                             (<-> x out))")
+          closure-value (strongest (:net closure-compiled)
+                                   (:cell closure-compiled))
+          n0 (run-compiled late)
+          n1 (nb/seed-cell n0 some-net-id closure-value)
+          n2 (nb/run-propagators n1
+                                 (nb/neighbor-propagator-ids n1 some-net-id))]
+      (is (not (str/includes? source "materialize-slot-object")))
+      (is (= 5 (strongest (run-compiled direct) (:cell direct))))
+      (is (= 4 (strongest n2 out-id))))))
 
 (deftest compile-2-bi-sync-chain-100
   (testing "compiler-2 handles a 100-hop <-> chain"
@@ -980,6 +1050,24 @@
                                  (nb/neighbor-propagator-ids n1 some-net-id))]
       (is (= value/nothing (strongest n0 out-id)))
       (is (= 3 (strongest n2 out-id))))))
+
+(deftest compile-2-def-net-reuses-unresolved-operator-cell
+  (testing "a later def-net fills the cell that an earlier application watches"
+    (let [a-def (compile-source "(def a)")
+          early (compile-source "(inc 1 a)"
+                                (:env a-def)
+                                {:net (:net a-def)})
+          inc-id (:binding/id (env/lookup (:env early) 'inc))
+          a-id (:binding/id (env/lookup (:env early) 'a))
+          n0 (nb/run-propagators (:net early) (:props early))
+          late (compile-source "(def-net inc [x] [out]
+                                  (<-> (+ x 1) out))"
+                               (:env early)
+                               {:net n0})
+          n1 (nb/run-propagators (:net late) (:props late))]
+      (is (= inc-id (:binding/id (env/lookup (:env late) 'inc))))
+      (is (= value/nothing (strongest n0 a-id)))
+      (is (= 2 (strongest n1 a-id))))))
 
 (deftest compile-2-application-before-closure-waits-for-later-input-fire
   (testing "an application can exist before the operator closure and evaluate on a later input update"
