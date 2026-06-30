@@ -44,6 +44,10 @@ Current implemented pieces:
   separate source blocks.
 - Multiple TUI/socket clients share one runtime session and one growing
   compiler environment.
+- Clients can talk to each other through block cells: one client can write a
+  value or graph into another client's block with `(block-at (instance other)
+  index value)`, and the receiving client sees that update as part of its own
+  view.
 
 The important property is that the runtime can inspect and update parts of its
 own interactive surface without leaving the propagation model.
@@ -78,6 +82,19 @@ The already-rendered trace graph for `a` can expand to show:
 ```
 
 That makes the graph view a reactive value, not a one-shot debugger screenshot.
+
+Because each client instance is also bound in the compiler environment, the
+same mechanism can send values across TUI sessions:
+
+```clojure
+(let-cell [msg]
+  (<-> "hello from A" msg)
+  (block-at (instance tui-b) 0 msg)
+  msg)
+```
+
+This is not a separate chat protocol. It is ordinary propagation into another
+client's block cell.
 
 ## Why This Is Unusual
 
