@@ -57,6 +57,22 @@ Runtime clients can inspect delivered XR requests with:
 {:op :xr/effects}
 ```
 
+In the current compiler-2 runtime surface, the receipt target should be a
+runtime-visible cell binding:
+
+```clojure
+(def receipt)
+(let-cell [g]
+  (trace out g)
+  (xr-io g receipt)
+  receipt)
+```
+
+Using a receipt that exists only inside the same `let-cell`, such as
+`(let-cell [g r] (trace out g) (xr-io g r) r)`, is not yet the supported path.
+That shape currently exposes a compiler/runtime local-output limitation rather
+than a browser problem.
+
 ## Web UI
 
 The web side is plain JavaScript modules using The Elm Architecture:
@@ -86,7 +102,17 @@ On graph load, the camera frames the current graph center; once the user moves
 the camera, manual control takes over. Labels are plain white text without
 background rectangles or glow.
 
-Run the prototype with:
+Run the integrated runtime with:
+
+```text
+clojure -M:wired/server
+```
+
+When compiler-2 code installs an `xr-io` propagator and it emits an XR launch
+effect, the runtime server starts an XR/browser projection server against the
+same runtime session. Connected browser clients subscribe to XR launch effects
+and receive the latest launch graph immediately, then receive updated launch
+graphs as the runtime changes. Run only the standalone XR projection with:
 
 ```text
 clojure -M -m graph.xr-server
@@ -99,3 +125,25 @@ clojure -M:wired/xr
 ```
 
 Then open `http://127.0.0.1:45666/`.
+
+## Future Session Boundary
+
+The current lazy launch path deliberately shares the compiler-2 runtime session
+with the XR projection. That is the smallest useful prototype because the XR UI
+can immediately inspect the same cells and semantic traces as the TUI.
+
+Longer term, XR should probably run as its own runtime session connected by an
+explicit boundary protocol. In that shape, `xr-io` would still emit a boundary
+effect from the compiler runtime, but the server would launch or address a
+separate XR session and pass only projection facts, receipts, and user commands
+across the boundary. That would make ownership clearer:
+
+- compiler-2 runtime owns propagation truth and effect scheduling;
+- XR runtime owns 3D/WebXR state, layout, controller state, and view-local
+  interaction state;
+- communication between them is only graph extension requests, cell messages,
+  projection snapshots, and receipts.
+
+This separation should make multi-view experiments safer: XR can restart,
+fork, replay, or hold local projection state without mutating or depending on
+the compiler runtime's internal session map.
