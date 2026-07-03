@@ -12,11 +12,12 @@
             [propagators.compiler-2.env :as env]
             [propagators.compiler-2.helpers :as h
              :refer [behavior-env
-                     behavior-tms-env
-                                                    default-env
-                                                    dependency-env]]
+                     default-env
+                     dependency-env]]
             [propagators.compiler-2.main :as main]
             [propagators.compiler-2.parser :as parser]
+            [propagators.compiler-2.tms-behavior
+             :refer [behavior-tms-env]]
             [propagators.core :as core]
             [propagators.datastructures.behavior :as behavior]
             [propagators.datastructures.behavior-algebra :as hist]
@@ -429,6 +430,13 @@
       (is (= 3 (strongest result-net (:cell compiled))))
       (is (= (:cell compiled) (main/compiled-result (:net compiled))))
       (is (= (:props compiled) (main/compiled-props (:net compiled)))))))
+
+(deftest compiler-2-default-env-uses-distributed-tms-premise-closure
+  (let [compiler-env (default-env)]
+    (is (some? (env/lookup compiler-env 'premise-input)))
+    (is (some? (env/lookup compiler-env 'premise-believe)))
+    (is (some? (env/lookup compiler-env 'tms-closure)))
+    (is (some? (env/lookup compiler-env 'premise-closure)))))
 
 (deftest compile-2-exposes-compound-cons-car-cdr
   (let [explicit (compile-source "(let-cell [pair head tail]
@@ -1349,8 +1357,8 @@
       (is (= value/nothing (strongest n0 out-id)))
       (is (= 3 (strongest n2 out-id))))))
 
-(deftest compile-2-def-net-reuses-unresolved-operator-cell
-  (testing "a later def-net fills the cell that an earlier application watches"
+(deftest compile-2-def-net-shadows-unresolved-operator-cell
+  (testing "a later def-net gets a fresh binding and does not mutate an earlier unresolved application"
     (let [a-def (compile-source "(def a)")
           early (compile-source "(inc 1 a)"
                                 (:env a-def)
@@ -1363,9 +1371,9 @@
                                (:env early)
                                {:net n0})
           n1 (nb/run-propagators (:net late) (:props late))]
-      (is (= inc-id (:binding/id (env/lookup (:env late) 'inc))))
+      (is (not= inc-id (:binding/id (env/lookup (:env late) 'inc))))
       (is (= value/nothing (strongest n0 a-id)))
-      (is (= 2 (strongest n1 a-id))))))
+      (is (= value/nothing (strongest n1 a-id))))))
 
 (deftest compile-2-application-before-closure-waits-for-later-input-fire
   (testing "an application can exist before the operator closure and evaluate on a later input update"
@@ -1680,8 +1688,8 @@
            (set (keys (reducer/reducer-slots
                        (net/network-cell-content n3 tms-id))))))))
 
-(deftest compiler-2-premise-closure-sugars-premise-marked-network
-  (let [base-env (-> (default-env)
+(deftest legacy-compiler-2-premise-closure-sugars-premise-marked-network
+  (let [base-env (-> (h/legacy-central-tms-env)
                      (env/bind 'believe-premise
                                (tms-premise-epoch-operator true)
                                0)
@@ -2224,6 +2232,69 @@
     (is (contains? (distributed-slot-keys n2 f-id)
                    (tms/premise-slot-key :premise/a 2)))))
 
+(deftest compiler-2-redefined-premise-closure-operator-switches-by-premise
+  (let [compile-step (fn [source env network]
+                       (let [compiled (compile-source source env {:net network})]
+                         [compiled (run-compiled compiled)]))
+        [setup n0] (compile-step
+                    "(let-cell [out]
+                       (def-net plus-one [x] [out]
+                         (<-> (+ x 1) out))
+                       (def-net plus-ten [x] [out]
+                         (<-> (+ x 10) out))
+                       (def x 5)
+                       (def p-one :definition/plus-one)
+                       (def p-ten :definition/plus-ten)
+                       (def e0 0)
+                       (def op
+                         (premise-closure
+                           (network [f x] [out]
+                             (f x out))
+                           p-one
+                           e0))
+                       (op plus-one x out)
+                       (def op
+                         (premise-closure
+                           (network [f x] [out]
+                             (f x out))
+                           p-ten
+                           e0))
+                       (op plus-ten x out)
+                       out)"
+                    (default-env)
+                    (tms-distributed-protocol-net))
+        env0 (:env setup)
+        out-id (env/binding-id (env/lookup env0 'out))
+        [one-retracted n1] (compile-step
+                          "(let-cell []
+                             (def one-retract 1)
+                             (premise-retract p-one one-retract out)
+                             out)"
+                          env0
+                          n0)
+        [one-brought n2] (compile-step
+                         "(let-cell []
+                            (def one-bring 2)
+                            (premise-believe p-one one-bring out)
+                            out)"
+                         (:env one-retracted)
+                         n1)
+        [_ten-retracted n3] (compile-step
+                             "(let-cell []
+                                (def ten-retract 3)
+                                (premise-retract p-ten ten-retract out)
+                                out)"
+                             (:env one-brought)
+                             n2)]
+    (is (= value/contradiction (strongest n0 out-id)))
+    (is (= 15 (distributed-current-value n1 out-id)))
+    (is (= value/contradiction (strongest n2 out-id)))
+    (is (= 6 (distributed-current-value n3 out-id)))
+    (is (contains? (distributed-slot-keys n3 out-id)
+                   (tms/premise-slot-key :definition/plus-one 2)))
+    (is (contains? (distributed-slot-keys n3 out-id)
+                   (tms/premise-slot-key :definition/plus-ten 3)))))
+
 (deftest compiler-2-distributed-premise-closure-marks-network-output
   (let [compile-step (fn [source env network]
                        (let [compiled (compile-source source env {:net network})]
@@ -2238,7 +2309,7 @@
                        (def-net inc [x] [out]
                          (<-> (+ x 1) out))
                        (def apply-inc
-                         (distributed-premise-closure
+                         (premise-closure
                            (network [f x] [out]
                              (f x out))
                            pd
