@@ -504,6 +504,28 @@
             {:at 8 :value 3}]
            (behavior-records (net/network-cell-content n (:cell compiled)))))))
 
+(deftest compiler-2-behavior-cell-can-use-slot-based-merge-closure
+  (let [compiled (main/compile-source-with-behavior-tms
+                  "(let-cell [events retained out]
+                     (def-net retain-latest-slot [acc next] [out]
+                       (let-cell [events* slot value next-events full]
+                         (behavior-state-events acc events*)
+                         (p:slot :slot slot next)
+                         (p:slot :value value next)
+                         (behavior-assoc-event events* slot value next-events)
+                         (behavior-state-from-events next-events full)
+                         (behavior-retain-last full 1 out)))
+                     (behavior-event 6 2 events)
+                     (behavior-event 8 3 events)
+                     (behavior-cell events (behavior-empty-state) retain-latest-slot retained)
+                     (<-> (+ retained retained) out)
+                     out)"
+                  {:net (behavior-tms-protocol-net)})
+        n (run-compiled compiled)]
+    (is (= 6 (behavior-current-value n (:cell compiled))))
+    (is (= [{:at 8 :value 6}]
+           (behavior-records (net/network-cell-content n (:cell compiled)))))))
+
 (deftest compiler-2-behavior-closure-reducer-can-retain-latest-in-chain
   (let [compiled (main/compile-source-with-behavior-tms
                   "(let-cell [events retained out]
@@ -543,6 +565,26 @@
             {:at 10 :value 10}]
            (behavior-records (net/network-cell-content n (:cell compiled)))))))
 
+(deftest compiler-2-behavior-cell-can-retain-window-in-chain
+  (let [compiled (main/compile-source-with-behavior-tms
+                  "(let-cell [events retained out]
+                     (def-net retain-window [acc next] [out]
+                       (let-cell [full]
+                         (behavior-add-event acc next full)
+                         (behavior-retain-last full 2 out)))
+                     (behavior-event 6 2 events)
+                     (behavior-event 8 3 events)
+                     (behavior-event 10 5 events)
+                     (behavior-cell events (behavior-empty-state) retain-window retained)
+                     (<-> (+ retained retained) out)
+                     out)"
+                  {:net (behavior-tms-protocol-net)})
+        n (run-compiled compiled)]
+    (is (= 10 (behavior-current-value n (:cell compiled))))
+    (is (= [{:at 8 :value 6}
+            {:at 10 :value 10}]
+           (behavior-records (net/network-cell-content n (:cell compiled)))))))
+
 (deftest compile-2-exposes-compound-cons-car-cdr
   (let [explicit (compile-source "(let-cell [pair head tail]
                                     (p:cons 1 2 pair)
@@ -556,6 +598,32 @@
         sugar-net (run-compiled sugar)]
     (is (= 3 (strongest explicit-net (:cell explicit))))
     (is (= 3 (strongest sugar-net (:cell sugar))))))
+
+(deftest compile-2-exposes-generic-slot
+  (let [compiled (compile-source "(let-cell [obj]
+                                    (p:slot :x 7 obj)
+                                    (+ (p:slot :x obj) 1))")
+        n (run-compiled compiled)]
+    (is (= 8 (strongest n (:cell compiled))))))
+
+(deftest compile-2-exposes-generic-slot-in-network-closure
+  (let [compiled (compile-source "(let-cell [obj out]
+                                    (def-net read-x [coll] [out]
+                                      (p:slot :x coll))
+                                    (p:slot :x 6 obj)
+                                    (read-x obj out)
+                                    (+ out 1))")
+        n (run-compiled compiled)]
+    (is (= 7 (strongest n (:cell compiled))))))
+
+(deftest compile-2-exposes-generic-slot-write-in-network-closure
+  (let [compiled (compile-source "(let-cell [obj]
+                                    (def-net make-x [v] [out]
+                                      (p:slot :x v out))
+                                    (make-x 6 obj)
+                                    (+ (p:slot :x obj) 1))")
+        n (run-compiled compiled)]
+    (is (= 7 (strongest n (:cell compiled))))))
 
 (deftest compile-2-retains-primitive-application-ir
   (testing "primitive applications keep an inspectable application object"
