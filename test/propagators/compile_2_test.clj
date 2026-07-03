@@ -438,6 +438,20 @@
     (is (some? (env/lookup compiler-env 'tms-closure)))
     (is (some? (env/lookup compiler-env 'premise-closure)))))
 
+(deftest compiler-2-main-compiles-with-default-behavior-tms-env
+  (let [compiled (main/compile-source-with-behavior-tms
+                  "(let-cell [out]
+                     (def value :yes)
+                     (def premise :from-main-entry)
+                     (def epoch 0)
+                     (premise-input value premise epoch out)
+                     out)"
+                  {:net (tms-distributed-protocol-net)})
+        n (run-compiled compiled)]
+    (is (= :yes (distributed-current-value n (:cell compiled))))
+    (is (contains? (distributed-slot-keys n (:cell compiled))
+                   (tms/premise-slot-key :from-main-entry 0)))))
+
 (deftest compile-2-exposes-compound-cons-car-cdr
   (let [explicit (compile-source "(let-cell [pair head tail]
                                     (p:cons 1 2 pair)
