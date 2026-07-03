@@ -1458,11 +1458,73 @@
       (is (= b-id (obj/slot-value app-info main/application-output-slot)))
       (is (= 42 (strongest result-net b-id))))))
 
+(deftest compile-2-supports-forward-sync-operator
+  (testing "-> installs one-way sync and returns the output cell"
+    (let [compiled (compile-source "(let-cell [out]
+                                      (-> 42 out)
+                                      out)")
+          result-net (run-compiled compiled)]
+      (is (= 42 (strongest result-net (:cell compiled)))))))
+
 (deftest compile-2-supports-switch-operator
   (testing "default env includes switch"
     (let [compiled (compile-source "(switch 9 true)")
           result-net (run-compiled compiled)]
+      (is (= 9 (strongest result-net (:cell compiled))))))
+  (testing "switch also supports an explicit output cell"
+    (let [compiled (compile-source "(let-cell [out]
+                                      (switch 9 true out)
+                                      out)")
+          result-net (run-compiled compiled)]
       (is (= 9 (strongest result-net (:cell compiled)))))))
+
+(deftest compile-2-switch-preserves-distributed-tms-through-forward-sync
+  (let [compiled (compile-source "(let-cell [a gated out]
+                                    (def value 2)
+                                    (def premise :switch/source)
+                                    (def epoch 0)
+                                    (premise-input value premise epoch a)
+                                    (switch a true gated)
+                                    (-> (+ gated 3) out)
+                                    out)"
+                                 (default-env)
+                                 {:net (tms-distributed-protocol-net)})
+        result-net (run-compiled compiled)]
+    (is (= 5 (distributed-current-value result-net (:cell compiled))))
+    (is (contains? (distributed-slot-keys result-net (:cell compiled))
+                   (tms/premise-slot-key :switch/source 0)))))
+
+(deftest compiler-2-behavior-tms-env-supports-switch-and-forward-sync
+  (testing "explicit-output switch gates behavior content"
+    (let [compiled (main/compile-source-with-behavior-tms
+                    "(let-cell [events retained gated out]
+                       (def-net retain-latest [acc next] [out]
+                         (let-cell [full]
+                           (behavior-add-event acc next full)
+                           (behavior-retain-last full 1 out)))
+                       (behavior-event 6 2 events)
+                       (behavior-cell events (behavior-empty-state) retain-latest retained)
+                       (switch retained true gated)
+                       (-> (+ gated gated) out)
+                       out)"
+                    {:net (behavior-tms-protocol-net)})
+          result-net (run-compiled compiled)]
+      (is (= 4 (behavior-current-value result-net (:cell compiled))))))
+  (testing "expression-style switch gates behavior content"
+    (let [compiled (main/compile-source-with-behavior-tms
+                    "(let-cell [events retained out]
+                       (def-net retain-latest [acc next] [out]
+                         (let-cell [full]
+                           (behavior-add-event acc next full)
+                           (behavior-retain-last full 1 out)))
+                       (behavior-event 6 2 events)
+                       (behavior-cell events (behavior-empty-state) retain-latest retained)
+                       (def gated (switch retained true))
+                       (-> (+ gated gated) out)
+                       out)"
+                    {:net (behavior-tms-protocol-net)})
+          result-net (run-compiled compiled)]
+      (is (= 4 (behavior-current-value result-net (:cell compiled)))))))
 
 (deftest compile-2-propagator-emits-runnable-network-value
   (testing "source AST/env cells can produce a compiled network cell"
@@ -1582,6 +1644,49 @@
                                                            41)})
         result-net (run-compiled compiled)]
     (is (= 41 (strongest result-net (:cell compiled))))))
+
+(deftest execute-sub-env-default-env-supports-switch-and-forward-sync
+  (let [x-id (ids/new-node-id)
+        parent-env (env/bind (default-env) 'x (env/cell-binding x-id) 0)
+        outer-env (env/bind (default-env) 'x (env/cell-binding x-id) 0)
+        expr (execute-sub-env-ast
+              (parse "(let-cell [gated out]
+                        (switch x true gated)
+                        (-> gated out)
+                        out)")
+              parent-env
+              'x)
+        compiled (main/compile-expr expr
+                                    outer-env
+                                    {:net (nb/install-cell net/empty-net
+                                                           x-id
+                                                           41
+                                                           41)})
+        result-net (run-compiled compiled)]
+    (is (= 41 (strongest result-net (:cell compiled))))))
+
+(deftest execute-sub-env-behavior-tms-env-supports-switch-and-forward-sync
+  (let [parent-env (behavior-tms-env)
+        expr (execute-sub-env-ast
+              (parse "(let-cell [events retained gated out]
+                        (def-net retain-latest [acc next] [out]
+                          (let-cell [full]
+                            (behavior-add-event acc next full)
+                            (behavior-retain-last full 1 out)))
+                        (behavior-event 6 2 events)
+                        (behavior-cell events
+                                       (behavior-empty-state)
+                                       retain-latest
+                                       retained)
+                        (switch retained true gated)
+                        (-> (+ gated gated) out)
+                        out)")
+              parent-env)
+        compiled (main/compile-expr-with-behavior-tms
+                  expr
+                  {:net (behavior-tms-protocol-net)})
+        result-net (run-compiled compiled)]
+    (is (= 4 (behavior-current-value result-net (:cell compiled))))))
 
 (deftest execute-sub-env-uses-parent-env-reducer-storage
   (let [value-id (ids/new-node-id)
