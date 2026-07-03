@@ -16,7 +16,7 @@
                      dependency-env]]
             [propagators.compiler-2.main :as main]
             [propagators.compiler-2.parser :as parser]
-            [propagators.compiler-2.tms-behavior
+            [propagators.compiler-2.behavior
              :refer [behavior-tms-env]]
             [propagators.core :as core]
             [propagators.datastructures.behavior :as behavior]
@@ -451,6 +451,97 @@
     (is (= :yes (distributed-current-value n (:cell compiled))))
     (is (contains? (distributed-slot-keys n (:cell compiled))
                    (tms/premise-slot-key :from-main-entry 0)))))
+
+(deftest compiler-2-main-can-define-behavior-producing-network
+  (let [compiled (main/compile-source-with-behavior-tms
+                  "(let-cell [a b out]
+                     (def-net make-point [t v] [out]
+                       (behavior-point t v out))
+                     (make-point 6 2 a)
+                     (make-point 6 7 b)
+                     (<-> (+ a b) out)
+                     out)"
+                  {:net (behavior-tms-protocol-net)})
+        n (run-compiled compiled)]
+    (is (= 9 (behavior-current-value n (:cell compiled))))
+    (is (= [{:at 6 :value 9}]
+           (behavior-records (net/network-cell-content n (:cell compiled)))))))
+
+(deftest compiler-2-main-can-build-behavior-with-compiler-closure-reducer
+  (let [compiled (main/compile-source-with-behavior-tms
+                  "(let-cell [events out]
+                     (def-net retain-event [acc update] [out]
+                       (behavior-add-event acc update out))
+                     (behavior-event 6 2 events)
+                     (behavior-event 8 3 events)
+                     (behavior events retain-event (behavior-empty-state) out)
+                     out)"
+                  {:net (behavior-tms-protocol-net)})
+        n (run-compiled compiled)]
+    (is (= 3 (behavior-current-value n (:cell compiled))))
+    (is (= [{:at 6 :value 2}
+            {:at 8 :value 3}]
+           (behavior-records (net/network-cell-content n (:cell compiled)))))))
+
+(deftest compiler-2-behavior-merge-can-use-low-level-operators
+  (let [compiled (main/compile-source-with-behavior-tms
+                  "(let-cell [events out]
+                     (def-net retain-event-low [acc update] [out]
+                       (let-cell [known tick value next]
+                         (behavior-state-events acc known)
+                         (behavior-update-tick update tick)
+                         (behavior-update-value update value)
+                         (behavior-assoc-event known tick value next)
+                         (behavior-state-from-events next out)))
+                     (behavior-event 6 2 events)
+                     (behavior-event 8 3 events)
+                     (behavior events retain-event-low (behavior-empty-state) out)
+                     out)"
+                  {:net (behavior-tms-protocol-net)})
+        n (run-compiled compiled)]
+    (is (= 3 (behavior-current-value n (:cell compiled))))
+    (is (= [{:at 6 :value 2}
+            {:at 8 :value 3}]
+           (behavior-records (net/network-cell-content n (:cell compiled)))))))
+
+(deftest compiler-2-behavior-closure-reducer-can-retain-latest-in-chain
+  (let [compiled (main/compile-source-with-behavior-tms
+                  "(let-cell [events retained out]
+                     (def-net retain-latest [acc update] [out]
+                       (let-cell [full]
+                         (behavior-add-event acc update full)
+                         (behavior-retain-last full 1 out)))
+                     (behavior-event 6 2 events)
+                     (behavior-event 8 3 events)
+                     (behavior-event 10 5 events)
+                     (behavior events retain-latest (behavior-empty-state) retained)
+                     (<-> (+ retained retained) out)
+                     out)"
+                  {:net (behavior-tms-protocol-net)})
+        n (run-compiled compiled)]
+    (is (= 10 (behavior-current-value n (:cell compiled))))
+    (is (= [{:at 10 :value 10}]
+           (behavior-records (net/network-cell-content n (:cell compiled)))))))
+
+(deftest compiler-2-behavior-closure-reducer-can-retain-window-in-chain
+  (let [compiled (main/compile-source-with-behavior-tms
+                  "(let-cell [events retained out]
+                     (def-net retain-window [acc update] [out]
+                       (let-cell [full]
+                         (behavior-add-event acc update full)
+                         (behavior-retain-last full 2 out)))
+                     (behavior-event 6 2 events)
+                     (behavior-event 8 3 events)
+                     (behavior-event 10 5 events)
+                     (behavior events retain-window (behavior-empty-state) retained)
+                     (<-> (+ retained retained) out)
+                     out)"
+                  {:net (behavior-tms-protocol-net)})
+        n (run-compiled compiled)]
+    (is (= 10 (behavior-current-value n (:cell compiled))))
+    (is (= [{:at 8 :value 6}
+            {:at 10 :value 10}]
+           (behavior-records (net/network-cell-content n (:cell compiled)))))))
 
 (deftest compile-2-exposes-compound-cons-car-cdr
   (let [explicit (compile-source "(let-cell [pair head tail]
