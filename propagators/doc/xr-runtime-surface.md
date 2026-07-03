@@ -92,4 +92,10 @@ Run the prototype with:
 clojure -M -m graph.xr-server
 ```
 
+or the shortcut:
+
+```text
+clojure -M:wired/xr
+```
+
 Then open `http://127.0.0.1:45666/`.
