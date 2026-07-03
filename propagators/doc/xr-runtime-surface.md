@@ -57,8 +57,16 @@ Runtime clients can inspect delivered XR requests with:
 {:op :xr/effects}
 ```
 
-In the current compiler-2 runtime surface, the receipt target should be a
-runtime-visible cell binding:
+The receipt may be an ordinary expression/local output:
+
+```clojure
+(let-cell [g r]
+  (trace out g)
+  (xr-io g r)
+  r)
+```
+
+or a runtime-visible cell binding:
 
 ```clojure
 (def receipt)
@@ -67,11 +75,6 @@ runtime-visible cell binding:
   (xr-io g receipt)
   receipt)
 ```
-
-Using a receipt that exists only inside the same `let-cell`, such as
-`(let-cell [g r] (trace out g) (xr-io g r) r)`, is not yet the supported path.
-That shape currently exposes a compiler/runtime local-output limitation rather
-than a browser problem.
 
 ## Web UI
 
