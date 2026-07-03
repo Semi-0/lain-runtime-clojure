@@ -585,6 +585,66 @@
             {:at 10 :value 10}]
            (behavior-records (net/network-cell-content n (:cell compiled)))))))
 
+(deftest compiler-2-behavior-syntax-latest-and-last-are-behaviors
+  (let [source "(let-cell [events retained out]
+                  (def-net retain-all [acc next] [out]
+                    (behavior-add-event acc next out))
+                  (behavior-event 6 2 events)
+                  (behavior-event 8 3 events)
+                  (behavior-event 10 5 events)
+                  (behavior-cell events (behavior-empty-state) retain-all retained)
+                  %s
+                  out)"
+        compiled (main/compile-source-with-behavior-tms
+                  (format source "(<-> (+ (latest retained) (latest retained)) out)")
+                  {:net (behavior-tms-protocol-net)})
+        n (run-compiled compiled)]
+    (is (= 10 (behavior-current-value n (:cell compiled))))
+    (is (= [{:at 10 :value 10}]
+           (behavior-records (net/network-cell-content n (:cell compiled)))))
+    (let [compiled (main/compile-source-with-behavior-tms
+                    (format source "(last retained 1 out)")
+                    {:net (behavior-tms-protocol-net)})
+          n (run-compiled compiled)]
+      (is (= 3 (behavior-current-value n (:cell compiled))))
+      (is (= [{:at 8 :value 3}]
+             (behavior-records (net/network-cell-content n (:cell compiled))))))))
+
+(deftest compiler-2-behavior-syntax-history-slices-return-behaviors
+  (let [base-source "(let-cell [events retained out]
+                       (def-net retain-all [acc next] [out]
+                         (behavior-add-event acc next out))
+                       (behavior-event 6 2 events)
+                       (behavior-event 8 3 events)
+                       (behavior-event 10 5 events)
+                       (behavior-cell events (behavior-empty-state) retain-all retained)
+                       %s
+                       out)"
+        compile-slice (fn [body]
+                        (let [compiled (main/compile-source-with-behavior-tms
+                                        (format base-source body)
+                                        {:net (behavior-tms-protocol-net)})]
+                          [compiled (run-compiled compiled)]))]
+    (let [[compiled n] (compile-slice "(history retained 0 2 out)")]
+      (is (= [{:at 6 :value 2}
+              {:at 8 :value 3}]
+             (behavior-records (net/network-cell-content n (:cell compiled))))))
+    (let [[compiled n] (compile-slice "(history-take retained 2 out)")]
+      (is (= [{:at 6 :value 2}
+              {:at 8 :value 3}]
+             (behavior-records (net/network-cell-content n (:cell compiled))))))
+    (let [[compiled n] (compile-slice "(history-drop retained 1 out)")]
+      (is (= [{:at 8 :value 3}
+              {:at 10 :value 5}]
+             (behavior-records (net/network-cell-content n (:cell compiled))))))
+    (let [[compiled n] (compile-slice "(history-split-at retained 2 out)")
+          split (net/network-cell-strongest n (:cell compiled))]
+      (is (= [{:at 6 :value 2}
+              {:at 8 :value 3}]
+             (behavior-records (obj/slot-value split :left))))
+      (is (= [{:at 10 :value 5}]
+             (behavior-records (obj/slot-value split :right)))))))
+
 (deftest compile-2-exposes-compound-cons-car-cdr
   (let [explicit (compile-source "(let-cell [pair head tail]
                                     (p:cons 1 2 pair)
