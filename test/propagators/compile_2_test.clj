@@ -10,7 +10,9 @@
             [propagators.compiler-2.ast :as ast]
             [propagators.compiler-2.closure-value :as closure-value]
             [propagators.compiler-2.env :as env]
-            [propagators.compiler-2.helpers :refer [behavior-env
+            [propagators.compiler-2.helpers :as h
+             :refer [behavior-env
+                     behavior-tms-env
                                                     default-env
                                                     dependency-env]]
             [propagators.compiler-2.main :as main]
@@ -20,7 +22,9 @@
             [propagators.datastructures.behavior-algebra :as hist]
             [propagators.datastructures.compound-object :as obj]
             [propagators.datastructures.dependency :as dependency]
+            [propagators.datastructures.reducer-cell :as reducer]
             [propagators.datastructures.scope-source :as scope-source]
+            [propagators.datastructures.tms :as tms]
             [propagators.ids :as ids]
             [propagators.message :refer [message]]
             [propagators.network :as net]
@@ -46,11 +50,24 @@
       (compile/install-and-run (protocol/install-cell-protocol))
       (compile/install-and-run (protocol/install-behavior-protocol))))
 
+(defn- behavior-tms-protocol-net
+  []
+  (-> net/empty-net
+      (compile/install-and-run (protocol/install-cell-protocol))
+      (compile/install-and-run (protocol/install-behavior-protocol))
+      (compile/install-and-run (protocol/install-tms-distributed-protocol))))
+
 (defn- scope-source-protocol-net
   []
   (-> net/empty-net
       (compile/install-and-run (protocol/install-cell-protocol))
       (compile/install-and-run (protocol/install-scope-source-protocol))))
+
+(defn- tms-distributed-protocol-net
+  []
+  (-> net/empty-net
+      (compile/install-and-run (protocol/install-cell-protocol))
+      (compile/install-and-run (protocol/install-tms-distributed-protocol))))
 
 (defn- behavior-view
   [records source-keys]
@@ -86,6 +103,32 @@
     (if (value/unusable? v)
       v
       (behavior/base-value v))))
+
+(defn- distributed-current-value
+  [n id]
+  (let [v (strongest n id)]
+    (if (value/unusable? v)
+      v
+      (tms/distributed-base-value v))))
+
+(defn- distributed-slot-keys
+  [n id]
+  (set (keys (tms/distributed-slots (net/network-cell-content n id)))))
+
+(defn- distributed-behavior-current-value
+  [n id]
+  (let [v (strongest n id)]
+    (if (value/unusable? v)
+      v
+      (behavior/base-value
+       (behavior/strongest-value (tms/distributed-base-value v))))))
+
+(defn- distributed-behavior-records
+  [n id]
+  (let [v (strongest n id)]
+    (if (value/unusable? v)
+      v
+      (behavior-records (tms/distributed-base-value v)))))
 
 (defn- scoped-base
   [v]
@@ -135,8 +178,249 @@
 (defn- compile-source
   ([source]
    (main/compile-source source))
+  ([source env]
+   (main/compile-source source env))
   ([source env opts]
    (main/compile-source source env opts)))
+
+(defn- reducer-test-node
+  [& parts]
+  (h/stable-node-id (into [:compile-2-test :execute-sub-env] parts)))
+
+(defn- latest-merge-net
+  []
+  (let [content-id (reducer-test-node :merge :content)
+        update-id (reducer-test-node :merge :update)
+        out-id (reducer-test-node :merge :out)
+        n0 (-> net/empty-net
+               (nb/install-cell content-id)
+               (nb/install-cell update-id)
+               (nb/install-cell out-id))
+        [_ n1] ((prop/construct-propagator
+                 (fn [_inputs _outputs network]
+                   (let [content (strongest network content-id)
+                         update (strongest network update-id)
+                         content* (if (value/nothing? content) {} content)
+                         update* (if (value/nothing? update) {} update)]
+                     [(message out-id (merge content* update*))]))
+                 [content-id update-id]
+                 [out-id])
+                n0)]
+    (-> n1
+        (net/assoc-net-dict-entry :content content-id)
+        (net/assoc-net-dict-entry :update update-id)
+        (net/assoc-net-dict-entry :out out-id))))
+
+(defn- latest-strongest-net
+  []
+  (let [slots-id (reducer-test-node :strongest :slots)
+        out-id (reducer-test-node :strongest :out)
+        epoch-id (reducer-test-node :strongest :epoch)
+        n0 (-> net/empty-net
+               (nb/install-cell slots-id)
+               (nb/install-cell out-id)
+               (nb/install-cell epoch-id))
+        [_ n1] ((prop/construct-propagator
+                 (fn [_inputs _outputs network]
+                   (let [slots (strongest network slots-id)
+                         latest (last (sort-by key (or slots {})))]
+                     [(message out-id (if latest (val latest) value/nothing))
+                      (message epoch-id [:latest (when latest (key latest))])]))
+                 [slots-id]
+                 [out-id epoch-id])
+                n0)]
+    (-> n1
+        (net/assoc-net-dict-entry :slots slots-id)
+        (net/assoc-net-dict-entry :out out-id)
+        (net/assoc-net-dict-entry :epoch epoch-id))))
+
+(def ^:private execute-merge-net (latest-merge-net))
+(def ^:private execute-strongest-net (latest-strongest-net))
+(def ^:private execute-reducer-id :compile-2-test/behavior)
+
+(defn- reducer-storage-cell
+  [n]
+  (let [id (ids/new-node-id)
+        v (reducer/reducer-cell execute-reducer-id
+                                execute-merge-net
+                                execute-strongest-net)]
+    [id (nb/install-cell n id v (reducer/strongest v))]))
+
+(defn- reducer-emit-operator
+  []
+  (with-meta
+    (fn [network [value-id storage-id] _out-id]
+      (let [[prop-id network']
+            ((reducer/p:reducer-slot execute-reducer-id
+                                     execute-merge-net
+                                     execute-strongest-net
+                                     [:event value-id]
+                                     value-id
+                                     storage-id)
+             network)]
+        [network' [prop-id] storage-id]))
+    {h/output-selector-key
+     (fn [[_value-id storage-id] fallback-id]
+       (or storage-id fallback-id))
+     h/application-activate-key
+     (fn [network _context-id [value-id storage-id] _out-id]
+       (let [raw (strongest network value-id)
+             v (if (reducer/reduced-value? raw)
+                 (reducer/reduced-result raw)
+                 raw)]
+         (if (value/unusable? v)
+           []
+           [(message storage-id
+                     (reducer/reducer-slot-update execute-reducer-id
+                                                  execute-merge-net
+                                                  execute-strongest-net
+                                                  [:event value-id]
+                                                  v))])))}))
+
+(defn- tms-claim-operator
+  [claim-id proposition supports]
+  (with-meta
+    (fn [network [value-id storage-id] _out-id]
+      (let [[prop-id network']
+            ((tms/p:tms-claim tms/reducer-id
+                              claim-id
+                              proposition
+                              supports
+                              value-id
+                              storage-id)
+             network)]
+        [network' [prop-id] storage-id]))
+    {h/output-selector-key
+     (fn [[_value-id storage-id] fallback-id]
+       (or storage-id fallback-id))
+     h/application-activate-key
+     (fn [network _context-id [value-id storage-id] _out-id]
+       (let [v (strongest network value-id)]
+         (if (value/unusable? v)
+           []
+           [(message storage-id
+                     (tms/claim-update
+                      (tms/claim claim-id proposition v supports)))])))}))
+
+(defn- tms-premise-operator
+  [premise epoch]
+  (with-meta
+    (fn [network [active-id storage-id] _out-id]
+      (let [[prop-id network']
+            ((tms/p:tms-premise tms/reducer-id
+                                premise
+                                epoch
+                                active-id
+                                storage-id)
+             network)]
+        [network' [prop-id] storage-id]))
+    {h/output-selector-key
+     (fn [[_active-id storage-id] fallback-id]
+       (or storage-id fallback-id))
+     h/application-activate-key
+     (fn [network _context-id [active-id storage-id] _out-id]
+       (let [v (strongest network active-id)]
+         (if (value/unusable? v)
+           []
+           [(message storage-id
+                     (tms/premise-update tms/reducer-id premise epoch v))])))}))
+
+(defn- tms-premise-source-operator
+  [epoch]
+  (with-meta
+    (fn [network [premise-id active-id storage-id] _out-id]
+      (let [[prop-id network']
+            ((tms/p:tms-premise-source tms/reducer-id
+                                       premise-id
+                                       epoch
+                                       active-id
+                                       storage-id)
+             network)]
+        [network' [prop-id] storage-id]))
+    {h/output-selector-key
+     (fn [[_premise-id _active-id storage-id] fallback-id]
+       (or storage-id fallback-id))
+     h/application-activate-key
+     (fn [network _context-id [premise-id active-id storage-id] _out-id]
+       (let [premise (strongest network premise-id)
+             active (strongest network active-id)]
+         (if (or (value/unusable? premise)
+                 (value/unusable? active))
+           []
+           [(message storage-id
+                     (tms/premise-update tms/reducer-id
+                                          premise
+                                          epoch
+                                          active))])))}))
+
+(defn- tms-premise-epoch-operator
+  [active?]
+  (with-meta
+    (fn [network [_premise-id _epoch-id storage-id] _out-id]
+      [network [] storage-id])
+    {h/output-selector-key
+     (fn [[_premise-id _epoch-id storage-id] fallback-id]
+       (or storage-id fallback-id))
+     h/application-activate-key
+     (fn [network _context-id [premise-id epoch-id storage-id] _out-id]
+       (let [premise (strongest network premise-id)
+             epoch (strongest network epoch-id)]
+         (if (or (value/unusable? premise)
+                 (value/unusable? epoch))
+           []
+           [(message storage-id
+                     (tms/premise-update tms/reducer-id
+                                         premise
+                                          epoch
+                                          active?))])))}))
+
+(defn- tms-insert-pair-messages
+  [network storage-id value-id premise-id]
+  (let [value (strongest network value-id)
+        premise (strongest network premise-id)]
+    (cond
+      (or (value/contradiction? value)
+          (value/contradiction? premise))
+      [(message storage-id value/contradiction)]
+
+      (or (value/nothing? value)
+          (value/nothing? premise))
+      []
+
+      :else
+      [(message storage-id
+                (tms/premise-update tms/reducer-id premise 0 true))
+       (message storage-id
+                (tms/claim-update
+                 (tms/claim [:insert premise]
+                            :answer
+                            value
+                            [(tms/support premise
+                                          :compiler-2
+                                          :insert)])))])))
+
+(defn- tms-insert-fact-operator
+  []
+  (with-meta
+    (fn [network [_storage-id _value-id _premise-id] _out-id]
+      [network [] _storage-id])
+    {h/output-selector-key
+     (fn [[storage-id _value-id _premise-id] fallback-id]
+       (or storage-id fallback-id))
+     h/application-activate-key
+     (fn [network _context-id [storage-id value-id premise-id] _out-id]
+       (tms-insert-pair-messages network
+                                 storage-id
+                                 value-id
+                                 premise-id))}))
+
+(defn- execute-sub-env-ast
+  [expr parent-env & watch-syms]
+  (apply ast/app
+         (ast/sym 'execute-sub-env)
+         (ast/lit expr)
+         (ast/lit parent-env)
+         (map ast/sym watch-syms)))
 
 (deftest compile-2-compiles-primitive-application
   (testing "application returns a fresh result cell"
@@ -145,6 +429,20 @@
       (is (= 3 (strongest result-net (:cell compiled))))
       (is (= (:cell compiled) (main/compiled-result (:net compiled))))
       (is (= (:props compiled) (main/compiled-props (:net compiled)))))))
+
+(deftest compile-2-exposes-compound-cons-car-cdr
+  (let [explicit (compile-source "(let-cell [pair head tail]
+                                    (p:cons 1 2 pair)
+                                    (p:car head pair)
+                                    (p:cdr tail pair)
+                                    (+ head tail))")
+        explicit-net (run-compiled explicit)
+        sugar (compile-source "(let-cell []
+                                 (def pair (cons 1 2))
+                                 (+ (car pair) (cdr pair)))")
+        sugar-net (run-compiled sugar)]
+    (is (= 3 (strongest explicit-net (:cell explicit))))
+    (is (= 3 (strongest sugar-net (:cell sugar))))))
 
 (deftest compile-2-retains-primitive-application-ir
   (testing "primitive applications keep an inspectable application object"
@@ -1091,3 +1389,1042 @@
       (is (= value/nothing (strongest n0 out-id)))
       (is (= value/nothing (strongest n2 out-id)))
       (is (= 9 (strongest n4 out-id))))))
+
+(deftest execute-sub-env-builds-compound-child-env-and-reads-parent
+  (let [x-id (ids/new-node-id)
+        parent-env (env/bind (default-env) 'x (env/cell-binding x-id) 0)
+        expr (execute-sub-env-ast (parse "x") parent-env)
+        compiled (main/compile-expr expr (default-env)
+                                    {:net (nb/install-cell net/empty-net
+                                                           x-id
+                                                           41
+                                                           41)})
+        result-net (run-compiled compiled)]
+    (is (= 41 (strongest result-net (:cell compiled))))))
+
+(deftest execute-sub-env-uses-parent-env-reducer-storage
+  (let [value-id (ids/new-node-id)
+        [storage-id n1] (reducer-storage-cell net/empty-net)
+        parent-env (-> (default-env)
+                       (env/bind 'emit (reducer-emit-operator) 0)
+                       (env/bind 'v (env/cell-binding value-id) 0)
+                       (env/bind 'store (env/cell-binding storage-id) 0))
+        outer-env (env/bind (default-env) 'v (env/cell-binding value-id) 0)
+        expr (execute-sub-env-ast (parse "(emit v store)") parent-env 'v)
+        compiled (main/compile-expr expr outer-env
+                                    {:net (nb/install-cell n1 value-id 10 10)})
+        result-net (run-compiled compiled)
+        out (strongest result-net (:cell compiled))
+        stored (strongest result-net storage-id)]
+    (is (reducer/reduced-value? out))
+    (is (= 10 (reducer/reduced-result out)))
+    (is (= 10 (reducer/reduced-result stored)))))
+
+(deftest execute-sub-env-reacts-to-later-reducer-slot-update
+  (let [[input-id n1] (reducer-storage-cell net/empty-net)
+        [storage-id n2] (reducer-storage-cell n1)
+        parent-env (-> (default-env)
+                       (env/bind 'emit (reducer-emit-operator) 0)
+                       (env/bind 'v (env/cell-binding input-id) 0)
+                       (env/bind 'store (env/cell-binding storage-id) 0))
+        outer-env (env/bind (default-env) 'v (env/cell-binding input-id) 0)
+        expr (execute-sub-env-ast (parse "(emit v store)") parent-env 'v)
+        initial-input (reducer/reducer-slot-update execute-reducer-id
+                                                   execute-merge-net
+                                                   execute-strongest-net
+                                                   [:input 0]
+                                                   10)
+        later-input (reducer/reducer-slot-update execute-reducer-id
+                                                 execute-merge-net
+                                                 execute-strongest-net
+                                                 [:input 1]
+                                                 20)
+        [_tasks n3] (core/eval-cell input-id (message input-id initial-input) n2)
+        compiled (main/compile-expr expr outer-env {:net n3})
+        n6 (run-compiled compiled)
+        [tasks n7] (core/eval-cell input-id (message input-id later-input) n6)
+        n8 (core/run-tasks tasks n7)]
+    (is (= 10 (reducer/reduced-result (strongest n6 (:cell compiled)))))
+    (is (= 20 (reducer/reduced-result (strongest n8 (:cell compiled)))))
+    (is (= 20 (reducer/reduced-result (strongest n8 storage-id))))))
+
+(deftest execute-sub-env-can-emit-tms-facts-through-parent-storage
+  (let [value-id (ids/new-node-id)
+        premise-id (ids/new-node-id)
+        active-id (ids/new-node-id)
+        inactive-id (ids/new-node-id)
+        tms-id (ids/new-node-id)
+        tms-cell (tms/tms-cell)
+        premise-value :p-from-cell
+        parent-env (-> (default-env)
+                       (env/bind 'claim (tms-claim-operator :c1 :answer
+                                                            [(tms/support premise-value
+                                                                          :child
+                                                                          :derived)])
+                                 0)
+                       (env/bind 'premise-source
+                                 (tms-premise-source-operator 0)
+                                 0)
+                       (env/bind 'premise-source-later
+                                 (tms-premise-source-operator 1)
+                                 0)
+                       (env/bind 'premise-id (env/cell-binding premise-id) 0)
+                       (env/bind 'value (env/cell-binding value-id) 0)
+                       (env/bind 'active (env/cell-binding active-id) 0)
+                       (env/bind 'inactive (env/cell-binding inactive-id) 0)
+                       (env/bind 'tms (env/cell-binding tms-id) 0))
+        outer-env (-> (default-env)
+                      (env/bind 'premise-id (env/cell-binding premise-id) 0)
+                      (env/bind 'value (env/cell-binding value-id) 0)
+                      (env/bind 'active (env/cell-binding active-id) 0)
+                      (env/bind 'inactive (env/cell-binding inactive-id) 0))
+        expr (parse "(let-cell []
+                       (premise-source premise-id active tms)
+                       (premise-source-later premise-id inactive tms)
+                       (claim value tms))")
+        outer-expr (execute-sub-env-ast expr
+                                        parent-env
+                                        'premise-id
+                                        'value
+                                        'active
+                                        'inactive)
+        compiled (main/compile-expr
+                  outer-expr
+                  outer-env
+                  {:net (-> net/empty-net
+                            (nb/install-cell premise-id
+                                             premise-value
+                                             premise-value)
+                            (nb/install-cell value-id :yes :yes)
+                            (nb/install-cell active-id true true)
+                            (nb/install-cell inactive-id)
+                            (nb/install-cell tms-id
+                                             tms-cell
+                                             (reducer/strongest tms-cell)))})
+        result-net (run-compiled compiled)
+        view (reducer/reduced-result (strongest result-net tms-id))
+        [inactive-tasks n1] (core/eval-cell inactive-id
+                                            (message inactive-id false)
+                                            result-net)
+        inactive-net (core/run-tasks inactive-tasks n1)
+        inactive-view (reducer/reduced-result (strongest inactive-net tms-id))]
+    (is (= #{premise-value} (tms/active-premises view)))
+    (is (= :yes (tms/proposition-value view :answer)))
+    (is (value/nothing? (tms/proposition-value inactive-view :answer)))
+    (is (= #{(tms/claim-slot-key :c1)
+             (tms/premise-slot-key premise-value 0)
+             (tms/premise-slot-key premise-value 1)
+             (tms/latest-premise-slot-key premise-value)}
+           (set (keys (reducer/reducer-slots
+                       (net/network-cell-content inactive-net tms-id))))))))
+
+(deftest compiler-2-tms-premise-epoch-primitives-chain-belief-and-retraction
+  (let [value-id (ids/new-node-id)
+        premise-id (ids/new-node-id)
+        believe-epoch-id (ids/new-node-id)
+        retract-epoch-id (ids/new-node-id)
+        tms-id (ids/new-node-id)
+        tms-cell (tms/tms-cell)
+        premise-value :p-from-cell
+        env (-> (default-env)
+                (env/bind 'believe-premise
+                          (tms-premise-epoch-operator true)
+                          0)
+                (env/bind 'retract-premise
+                          (tms-premise-epoch-operator false)
+                          0)
+                (env/bind 'claim (tms-claim-operator :c1 :answer
+                                                     [(tms/support premise-value
+                                                                   :compiler-2
+                                                                   :derived)])
+                          0)
+                (env/bind 'premise-id (env/cell-binding premise-id) 0)
+                (env/bind 'believe-epoch (env/cell-binding believe-epoch-id) 0)
+                (env/bind 'retract-epoch (env/cell-binding retract-epoch-id) 0)
+                (env/bind 'value (env/cell-binding value-id) 0)
+                (env/bind 'tms (env/cell-binding tms-id) 0))
+        expr (parse "(let-cell []
+                       (believe-premise premise-id believe-epoch tms)
+                       (retract-premise premise-id retract-epoch tms)
+                       (claim value tms))")
+        compiled (main/compile-expr
+                  expr
+                  env
+                  {:net (-> net/empty-net
+                            (nb/install-cell premise-id
+                                             premise-value
+                                             premise-value)
+                            (nb/install-cell believe-epoch-id 0 0)
+                            (nb/install-cell retract-epoch-id)
+                            (nb/install-cell value-id :yes :yes)
+                            (nb/install-cell tms-id
+                                             tms-cell
+                                             (reducer/strongest tms-cell)))})
+        believed-net (run-compiled compiled)
+        believed-view (reducer/reduced-result (strongest believed-net tms-id))
+        [retract-tasks n1] (core/eval-cell retract-epoch-id
+                                           (message retract-epoch-id 1)
+                                           believed-net)
+        retracted-net (core/run-tasks retract-tasks n1)
+        retracted-view (reducer/reduced-result (strongest retracted-net tms-id))]
+    (is (= #{premise-value} (tms/active-premises believed-view)))
+    (is (= :yes (tms/proposition-value believed-view :answer)))
+    (is (value/nothing? (tms/proposition-value retracted-view :answer)))
+    (is (= #{(tms/claim-slot-key :c1)
+             (tms/premise-slot-key premise-value 0)
+             (tms/premise-slot-key premise-value 1)
+             (tms/latest-premise-slot-key premise-value)}
+           (set (keys (reducer/reducer-slots
+                       (net/network-cell-content retracted-net tms-id))))))))
+
+(deftest compiler-2-tms-insert-uses-compiler-compound-pair
+  (let [env (env/bind (default-env)
+                      'tms-insert
+                      (tms-insert-fact-operator)
+                      0)
+        compiled (compile-source "(let-cell []
+                                    (def value :yes)
+                                    (def premise :from-pair)
+                                    (def tms)
+                                    (def pair (cons value premise))
+                                    (tms-insert tms (car pair) (cdr pair))
+                                    tms)"
+                                 env)
+        n0 (run-compiled compiled)
+        view (reducer/reduced-result (strongest n0 (:cell compiled)))]
+    (is (= #{:from-pair} (tms/active-premises view)))
+    (is (= :yes (tms/proposition-value view :answer)))
+    (is (= #{(tms/claim-slot-key [:insert :from-pair])
+             (tms/premise-slot-key :from-pair 0)
+             (tms/latest-premise-slot-key :from-pair)}
+           (set (keys (reducer/reducer-slots
+                       (net/network-cell-content n0 (:cell compiled)))))))))
+
+(deftest compiler-2-tms-closure-premise-output-switches-applied-definition
+  (let [base-env (-> (default-env)
+                     (env/bind 'premise-out
+                               (tms-insert-fact-operator)
+                               0)
+                     (env/bind 'believe-premise
+                               (tms-premise-epoch-operator true)
+                               0)
+                     (env/bind 'retract-premise
+                               (tms-premise-epoch-operator false)
+                               0))
+        compile-step (fn [source env network]
+                       (let [compiled (compile-source source env {:net network})]
+                         [compiled (run-compiled compiled)]))
+        [setup n0] (compile-step
+                    "(let-cell [one-out ten-out]
+                       (def-net apply-out [f x] [out]
+                         (f x out))
+                       (def-net plus-one [x] [out]
+                         (<-> (+ x 1) out))
+                       (def-net plus-ten [x] [out]
+                         (<-> (+ x 10) out))
+                       (def x 5)
+                       (def p-one :definition/plus-one)
+                       (def p-ten :definition/plus-ten)
+                       (def one-believe 0)
+                       (def ten-believe 0)
+                       (def tms)
+                       (apply-out plus-one x one-out)
+                       (apply-out plus-ten x ten-out)
+                       (premise-out tms one-out p-one)
+                       (premise-out tms ten-out p-ten)
+                       (believe-premise p-one one-believe tms)
+                       (believe-premise p-ten ten-believe tms)
+                       tms)"
+                    base-env
+                    net/empty-net)
+        env0 (:env setup)
+        tms-id (env/binding-id (env/lookup env0 'tms))
+        view0 (reducer/reduced-result (strongest n0 tms-id))
+        [one-retracted n1] (compile-step
+                            "(let-cell []
+                               (def one-retract 1)
+                               (retract-premise p-one one-retract tms)
+                               tms)"
+                            env0
+                            n0)
+        view1 (reducer/reduced-result (strongest n1 tms-id))
+        [one-brought n2] (compile-step
+                          "(let-cell []
+                             (def one-bring 2)
+                             (believe-premise p-one one-bring tms)
+                             tms)"
+                          (:env one-retracted)
+                          n1)
+        view2 (reducer/reduced-result (strongest n2 tms-id))
+        [_ten-retracted n3] (compile-step
+                             "(let-cell []
+                                (def ten-retract 3)
+                                (retract-premise p-ten ten-retract tms)
+                                tms)"
+                             (:env one-brought)
+                             n2)
+        view3 (reducer/reduced-result (strongest n3 tms-id))]
+    (is (= value/contradiction (tms/proposition-value view0 :answer)))
+    (is (= 15 (tms/proposition-value view1 :answer)))
+    (is (= value/contradiction (tms/proposition-value view2 :answer)))
+    (is (= 6 (tms/proposition-value view3 :answer)))
+    (is (= #{(tms/claim-slot-key [:insert :definition/plus-one])
+             (tms/claim-slot-key [:insert :definition/plus-ten])
+             (tms/premise-slot-key :definition/plus-one 0)
+             (tms/premise-slot-key :definition/plus-one 1)
+             (tms/premise-slot-key :definition/plus-one 2)
+             (tms/premise-slot-key :definition/plus-ten 0)
+             (tms/premise-slot-key :definition/plus-ten 3)
+             (tms/latest-premise-slot-key :definition/plus-one)
+             (tms/latest-premise-slot-key :definition/plus-ten)}
+           (set (keys (reducer/reducer-slots
+                       (net/network-cell-content n3 tms-id))))))))
+
+(deftest compiler-2-premise-closure-sugars-premise-marked-network
+  (let [base-env (-> (default-env)
+                     (env/bind 'believe-premise
+                               (tms-premise-epoch-operator true)
+                               0)
+                     (env/bind 'retract-premise
+                               (tms-premise-epoch-operator false)
+                               0))
+        compile-step (fn [source env network]
+                       (let [compiled (compile-source source env {:net network})]
+                         [compiled (run-compiled compiled)]))
+        [setup n0] (compile-step
+                    "(let-cell [one-out ten-out]
+                       (def-net plus-one [x] [out]
+                         (<-> (+ x 1) out))
+                       (def-net plus-ten [x] [out]
+                         (<-> (+ x 10) out))
+                       (def x 5)
+                       (def p-one :definition/plus-one)
+                       (def p-ten :definition/plus-ten)
+                       (def one-believe 0)
+                       (def ten-believe 0)
+                       (def tms)
+                       (def apply-one
+                         (premise-closure
+                           (network [f x] [out]
+                             (f x out))
+                           p-one
+                           tms))
+                       (def apply-ten
+                         (premise-closure
+                           (network [f x] [out]
+                             (f x out))
+                           p-ten
+                           tms))
+                       (apply-one plus-one x one-out)
+                       (apply-ten plus-ten x ten-out)
+                       (believe-premise p-one one-believe tms)
+                       (believe-premise p-ten ten-believe tms)
+                       tms)"
+                    base-env
+                    net/empty-net)
+        env0 (:env setup)
+        tms-id (env/binding-id (env/lookup env0 'tms))
+        view0 (reducer/reduced-result (strongest n0 tms-id))
+        [one-retracted n1] (compile-step
+                            "(let-cell []
+                               (def one-retract 1)
+                               (retract-premise p-one one-retract tms)
+                               tms)"
+                            env0
+                            n0)
+        view1 (reducer/reduced-result (strongest n1 tms-id))
+        [_ten-retracted n2] (compile-step
+                             "(let-cell []
+                                (def ten-retract 2)
+                                (retract-premise p-ten ten-retract tms)
+                                tms)"
+                             (:env one-retracted)
+                             n1)
+        view2 (reducer/reduced-result (strongest n2 tms-id))]
+    (is (= value/contradiction (tms/proposition-value view0 :answer)))
+    (is (= 15 (tms/proposition-value view1 :answer)))
+    (is (value/nothing? (tms/proposition-value view2 :answer)))
+    (is (= #{:definition/plus-one :definition/plus-ten}
+           (set (keep (fn [slot-key]
+                        (when (= :tms/claim (first slot-key))
+                          (second (second slot-key))))
+                      (keys (reducer/reducer-slots
+                             (net/network-cell-content n2 tms-id)))))))))
+
+(deftest compiler-2-tms-multiple-premises-retract-and-bring-in
+  (let [value-id (ids/new-node-id)
+        p1-id (ids/new-node-id)
+        p2-id (ids/new-node-id)
+        p1-believe-id (ids/new-node-id)
+        p1-retract-id (ids/new-node-id)
+        p1-bring-id (ids/new-node-id)
+        p2-believe-id (ids/new-node-id)
+        p2-retract-id (ids/new-node-id)
+        tms-id (ids/new-node-id)
+        tms-cell (tms/tms-cell)
+        p1 :premise/a
+        p2 :premise/b
+        env (-> (default-env)
+                (env/bind 'believe-premise
+                          (tms-premise-epoch-operator true)
+                          0)
+                (env/bind 'retract-premise
+                          (tms-premise-epoch-operator false)
+                          0)
+                (env/bind 'claim (tms-claim-operator :c1 :answer
+                                                     [(tms/support p1
+                                                                   :compiler-2
+                                                                   :source-a)
+                                                      (tms/support p2
+                                                                   :compiler-2
+                                                                   :source-b)])
+                          0)
+                (env/bind 'p1 (env/cell-binding p1-id) 0)
+                (env/bind 'p2 (env/cell-binding p2-id) 0)
+                (env/bind 'p1-believe (env/cell-binding p1-believe-id) 0)
+                (env/bind 'p1-retract (env/cell-binding p1-retract-id) 0)
+                (env/bind 'p1-bring (env/cell-binding p1-bring-id) 0)
+                (env/bind 'p2-believe (env/cell-binding p2-believe-id) 0)
+                (env/bind 'p2-retract (env/cell-binding p2-retract-id) 0)
+                (env/bind 'value (env/cell-binding value-id) 0)
+                (env/bind 'tms (env/cell-binding tms-id) 0))
+        expr (parse "(let-cell []
+                       (believe-premise p1 p1-believe tms)
+                       (retract-premise p1 p1-retract tms)
+                       (believe-premise p1 p1-bring tms)
+                       (believe-premise p2 p2-believe tms)
+                       (retract-premise p2 p2-retract tms)
+                       (claim value tms))")
+        compiled (main/compile-expr
+                  expr
+                  env
+                  {:net (-> net/empty-net
+                            (nb/install-cell p1-id p1 p1)
+                            (nb/install-cell p2-id p2 p2)
+                            (nb/install-cell p1-believe-id 0 0)
+                            (nb/install-cell p1-retract-id)
+                            (nb/install-cell p1-bring-id)
+                            (nb/install-cell p2-believe-id 0 0)
+                            (nb/install-cell p2-retract-id)
+                            (nb/install-cell value-id :yes :yes)
+                            (nb/install-cell tms-id
+                                             tms-cell
+                                             (reducer/strongest tms-cell)))})
+        n0 (run-compiled compiled)
+        view0 (reducer/reduced-result (strongest n0 tms-id))
+        [p1-retract-tasks n1] (core/eval-cell p1-retract-id
+                                               (message p1-retract-id 1)
+                                               n0)
+        n2 (core/run-tasks p1-retract-tasks n1)
+        view1 (reducer/reduced-result (strongest n2 tms-id))
+        [p1-bring-tasks n3] (core/eval-cell p1-bring-id
+                                            (message p1-bring-id 2)
+                                            n2)
+        n4 (core/run-tasks p1-bring-tasks n3)
+        view2 (reducer/reduced-result (strongest n4 tms-id))
+        [p2-retract-tasks n5] (core/eval-cell p2-retract-id
+                                               (message p2-retract-id 3)
+                                               n4)
+        n6 (core/run-tasks p2-retract-tasks n5)
+        view3 (reducer/reduced-result (strongest n6 tms-id))]
+    (is (= :yes (tms/proposition-value view0 :answer)))
+    (is (value/nothing? (tms/proposition-value view1 :answer)))
+    (is (= :yes (tms/proposition-value view2 :answer)))
+    (is (value/nothing? (tms/proposition-value view3 :answer)))
+    (is (= #{(tms/claim-slot-key :c1)
+             (tms/premise-slot-key p1 0)
+             (tms/premise-slot-key p1 1)
+             (tms/premise-slot-key p1 2)
+             (tms/premise-slot-key p2 0)
+             (tms/premise-slot-key p2 3)
+             (tms/latest-premise-slot-key p1)
+             (tms/latest-premise-slot-key p2)}
+           (set (keys (reducer/reducer-slots
+                       (net/network-cell-content n6 tms-id))))))))
+
+(deftest compiler-2-tms-tracks-arithmetic-propagator-chain
+  (let [a-id (ids/new-node-id)
+        b-id (ids/new-node-id)
+        c-id (ids/new-node-id)
+        d-id (ids/new-node-id)
+        f-id (ids/new-node-id)
+        pa-id (ids/new-node-id)
+        pb-id (ids/new-node-id)
+        pc-id (ids/new-node-id)
+        pd-id (ids/new-node-id)
+        pa-believe-id (ids/new-node-id)
+        pb-believe-id (ids/new-node-id)
+        pc-believe-id (ids/new-node-id)
+        pd-believe-id (ids/new-node-id)
+        pa-retract-id (ids/new-node-id)
+        pa-bring-id (ids/new-node-id)
+        tms-id (ids/new-node-id)
+        tms-cell (tms/tms-cell)
+        pa :premise/a
+        pb :premise/b
+        pc :premise/c
+        pd :premise/d
+        env (-> (default-env)
+                (env/bind 'believe-premise
+                          (tms-premise-epoch-operator true)
+                          0)
+                (env/bind 'retract-premise
+                          (tms-premise-epoch-operator false)
+                          0)
+                (env/bind 'claim (tms-claim-operator :chain :computed
+                                                     [(tms/support pa :chain :a)
+                                                      (tms/support pb :chain :b)
+                                                      (tms/support pc :chain :c)
+                                                      (tms/support pd :chain :d)])
+                          0)
+                (env/bind 'a (env/cell-binding a-id) 0)
+                (env/bind 'b (env/cell-binding b-id) 0)
+                (env/bind 'c (env/cell-binding c-id) 0)
+                (env/bind 'd (env/cell-binding d-id) 0)
+                (env/bind 'f (env/cell-binding f-id) 0)
+                (env/bind 'pa (env/cell-binding pa-id) 0)
+                (env/bind 'pb (env/cell-binding pb-id) 0)
+                (env/bind 'pc (env/cell-binding pc-id) 0)
+                (env/bind 'pd (env/cell-binding pd-id) 0)
+                (env/bind 'pa-believe (env/cell-binding pa-believe-id) 0)
+                (env/bind 'pb-believe (env/cell-binding pb-believe-id) 0)
+                (env/bind 'pc-believe (env/cell-binding pc-believe-id) 0)
+                (env/bind 'pd-believe (env/cell-binding pd-believe-id) 0)
+                (env/bind 'pa-retract (env/cell-binding pa-retract-id) 0)
+                (env/bind 'pa-bring (env/cell-binding pa-bring-id) 0)
+                (env/bind 'tms (env/cell-binding tms-id) 0))
+        expr (parse "(let-cell [e]
+                       (<-> (* (+ (- a b) c) d) e)
+                       (<-> e f)
+                       (believe-premise pa pa-believe tms)
+                       (believe-premise pb pb-believe tms)
+                       (believe-premise pc pc-believe tms)
+                       (believe-premise pd pd-believe tms)
+                       (retract-premise pa pa-retract tms)
+                       (believe-premise pa pa-bring tms)
+                       (claim f tms))")
+        compiled (main/compile-expr
+                  expr
+                  env
+                  {:net (-> net/empty-net
+                            (nb/install-cell a-id 8 8)
+                            (nb/install-cell b-id 3 3)
+                            (nb/install-cell c-id 2 2)
+                            (nb/install-cell d-id 4 4)
+                            (nb/install-cell f-id)
+                            (nb/install-cell pa-id pa pa)
+                            (nb/install-cell pb-id pb pb)
+                            (nb/install-cell pc-id pc pc)
+                            (nb/install-cell pd-id pd pd)
+                            (nb/install-cell pa-believe-id 0 0)
+                            (nb/install-cell pb-believe-id 0 0)
+                            (nb/install-cell pc-believe-id 0 0)
+                            (nb/install-cell pd-believe-id 0 0)
+                            (nb/install-cell pa-retract-id)
+                            (nb/install-cell pa-bring-id)
+                            (nb/install-cell tms-id
+                                             tms-cell
+                                             (reducer/strongest tms-cell)))})
+        n0 (run-compiled compiled)
+        view0 (reducer/reduced-result (strongest n0 tms-id))
+        [retract-tasks n1] (core/eval-cell pa-retract-id
+                                            (message pa-retract-id 1)
+                                            n0)
+        n2 (core/run-tasks retract-tasks n1)
+        view1 (reducer/reduced-result (strongest n2 tms-id))
+        [bring-tasks n3] (core/eval-cell pa-bring-id
+                                         (message pa-bring-id 2)
+                                         n2)
+        n4 (core/run-tasks bring-tasks n3)
+        view2 (reducer/reduced-result (strongest n4 tms-id))]
+    (is (= 28 (strongest n0 f-id)))
+    (is (= 28 (tms/proposition-value view0 :computed)))
+    (is (value/nothing? (tms/proposition-value view1 :computed)))
+    (is (= 28 (tms/proposition-value view2 :computed)))
+    (is (= #{(tms/claim-slot-key :chain)
+             (tms/premise-slot-key pa 0)
+             (tms/premise-slot-key pa 1)
+             (tms/premise-slot-key pa 2)
+             (tms/premise-slot-key pb 0)
+             (tms/premise-slot-key pc 0)
+             (tms/premise-slot-key pd 0)
+             (tms/latest-premise-slot-key pa)
+             (tms/latest-premise-slot-key pb)
+             (tms/latest-premise-slot-key pc)
+             (tms/latest-premise-slot-key pd)}
+           (set (keys (reducer/reducer-slots
+                       (net/network-cell-content n4 tms-id))))))))
+
+(deftest compiler-2-tms-conflicting-chain-claims-retract-and-switch
+  (let [base-env (-> (default-env)
+                     (env/bind 'believe-premise
+                               (tms-premise-epoch-operator true)
+                               0)
+                     (env/bind 'retract-premise
+                               (tms-premise-epoch-operator false)
+                               0)
+                     (env/bind 'claim-left
+                               (tms-claim-operator :left
+                                                   :shared
+                                                   [(tms/support :premise/left
+                                                                 :chain
+                                                                 :left)])
+                               0)
+                     (env/bind 'claim-right
+                               (tms-claim-operator :right
+                                                   :shared
+                                                   [(tms/support :premise/right
+                                                                 :chain
+                                                                 :right)])
+                               0))
+        compile-step (fn [source env network]
+                       (let [compiled (compile-source source env {:net network})]
+                         [compiled (run-compiled compiled)]))
+        [setup n0] (compile-step
+                    "(let-cell [e-left f-left e-right f-right]
+                       (def a 8)
+                       (def b 3)
+                       (def c 2)
+                       (def d 4)
+                       (def p-left :premise/left)
+                       (def p-right :premise/right)
+                       (def left-believe 0)
+                       (def right-believe 0)
+                       (def tms)
+                       (<-> (* (+ (- a b) c) d) e-left)
+                       (<-> e-left f-left)
+                       (<-> (* (+ (- a c) b) d) e-right)
+                       (<-> e-right f-right)
+                       (believe-premise p-left left-believe tms)
+                       (believe-premise p-right right-believe tms)
+                       (claim-left f-left tms)
+                       (claim-right f-right tms)
+                       tms)"
+                    base-env
+                    net/empty-net)
+        env0 (:env setup)
+        id-of (fn [sym] (env/binding-id (env/lookup env0 sym)))
+        tms-id (id-of 'tms)
+        f-left-id (id-of 'f-left)
+        f-right-id (id-of 'f-right)
+        view0 (reducer/reduced-result (strongest n0 tms-id))
+        [left-retracted n1] (compile-step
+                             "(let-cell []
+                                (def left-retract 1)
+                                (retract-premise p-left left-retract tms)
+                                tms)"
+                             env0
+                             n0)
+        view1 (reducer/reduced-result (strongest n1 tms-id))
+        [left-brought n2] (compile-step
+                           "(let-cell []
+                              (def left-bring 2)
+                              (believe-premise p-left left-bring tms)
+                              tms)"
+                           (:env left-retracted)
+                           n1)
+        view2 (reducer/reduced-result (strongest n2 tms-id))
+        [right-retracted n3] (compile-step
+                              "(let-cell []
+                                 (def right-retract 3)
+                                 (retract-premise p-right right-retract tms)
+                                 tms)"
+                              (:env left-brought)
+                              n2)
+        view3 (reducer/reduced-result (strongest n3 tms-id))
+        [right-brought n4] (compile-step
+                            "(let-cell []
+                               (def right-bring 4)
+                               (believe-premise p-right right-bring tms)
+                               tms)"
+                            (:env right-retracted)
+                            n3)
+        view4 (reducer/reduced-result (strongest n4 tms-id))
+        [left-retracted-again n5] (compile-step
+                                   "(let-cell []
+                                      (def left-retract-2 5)
+                                      (retract-premise p-left left-retract-2 tms)
+                                      tms)"
+                                   (:env right-brought)
+                                   n4)
+        view5 (reducer/reduced-result (strongest n5 tms-id))
+        [left-brought-again n6] (compile-step
+                                 "(let-cell []
+                                    (def left-bring-2 6)
+                                    (believe-premise p-left left-bring-2 tms)
+                                    tms)"
+                                 (:env left-retracted-again)
+                                 n5)
+        view6 (reducer/reduced-result (strongest n6 tms-id))
+        [_right-retracted-again n7] (compile-step
+                                     "(let-cell []
+                                        (def right-retract-2 7)
+                                        (retract-premise p-right right-retract-2 tms)
+                                        tms)"
+                                     (:env left-brought-again)
+                                     n6)
+        view7 (reducer/reduced-result (strongest n7 tms-id))]
+    (is (= 28 (strongest n0 f-left-id)))
+    (is (= 36 (strongest n0 f-right-id)))
+    (is (= value/contradiction (tms/proposition-value view0 :shared)))
+    (is (= 36 (tms/proposition-value view1 :shared)))
+    (is (= value/contradiction (tms/proposition-value view2 :shared)))
+    (is (= 28 (tms/proposition-value view3 :shared)))
+    (is (= value/contradiction (tms/proposition-value view4 :shared)))
+    (is (= 36 (tms/proposition-value view5 :shared)))
+    (is (= value/contradiction (tms/proposition-value view6 :shared)))
+    (is (= 28 (tms/proposition-value view7 :shared)))
+    (is (= #{(tms/claim-slot-key :left)
+             (tms/claim-slot-key :right)
+             (tms/premise-slot-key :premise/left 0)
+             (tms/premise-slot-key :premise/left 1)
+             (tms/premise-slot-key :premise/left 2)
+             (tms/premise-slot-key :premise/left 5)
+             (tms/premise-slot-key :premise/left 6)
+             (tms/premise-slot-key :premise/right 0)
+             (tms/premise-slot-key :premise/right 3)
+             (tms/premise-slot-key :premise/right 4)
+             (tms/premise-slot-key :premise/right 7)
+             (tms/latest-premise-slot-key :premise/left)
+             (tms/latest-premise-slot-key :premise/right)}
+           (set (keys (reducer/reducer-slots
+                       (net/network-cell-content n7 tms-id))))))))
+
+(deftest compiler-2-distributed-tms-premises-flow-through-chain
+  (let [compile-step (fn [source env network]
+                       (let [compiled (compile-source source env {:net network})]
+                         [compiled (run-compiled compiled)]))
+        [setup n0] (compile-step
+                    "(let-cell [a b c d e f]
+                       (def va 8)
+                       (def vb 3)
+                       (def vc 2)
+                       (def vd 4)
+                       (def pa :premise/a)
+                       (def pb :premise/b)
+                       (def pc :premise/c)
+                       (def pd :premise/d)
+                       (def pa0 0)
+                       (def pb0 0)
+                       (def pc0 0)
+                       (def pd0 0)
+                       (premise-input va pa pa0 a)
+                       (premise-input vb pb pb0 b)
+                       (premise-input vc pc pc0 c)
+                       (premise-input vd pd pd0 d)
+                       (<-> (* (+ (- a b) c) d) e)
+                       (<-> e f)
+                       f)"
+                    (default-env)
+                    (tms-distributed-protocol-net))
+        env0 (:env setup)
+        id-of (fn [sym] (env/binding-id (env/lookup env0 sym)))
+        a-id (id-of 'a)
+        d-id (id-of 'd)
+        e-id (id-of 'e)
+        f-id (id-of 'f)
+        [a-retracted n1] (compile-step
+                          "(let-cell []
+                             (def pa1 1)
+                             (premise-retract pa pa1 a)
+                             f)"
+                          env0
+                          n0)
+        [a-brought n2] (compile-step
+                        "(let-cell []
+                           (def pa2 2)
+                           (premise-believe pa pa2 a)
+                           f)"
+                        (:env a-retracted)
+                        n1)
+        [d-retracted n3] (compile-step
+                          "(let-cell []
+                             (def pd3 3)
+                             (premise-retract pd pd3 d)
+                             f)"
+                          (:env a-brought)
+                          n2)
+        [_d-brought n4] (compile-step
+                         "(let-cell []
+                            (def pd4 4)
+                            (premise-believe pd pd4 d)
+                            f)"
+                         (:env d-retracted)
+                         n3)]
+    (is (= 28 (distributed-current-value n0 f-id)))
+    (is (contains? (distributed-slot-keys n0 f-id)
+                   (tms/premise-slot-key :premise/a 0)))
+    (is (value/nothing? (strongest n1 e-id)))
+    (is (value/nothing? (strongest n1 f-id)))
+    (is (contains? (distributed-slot-keys n1 f-id)
+                   (tms/premise-slot-key :premise/a 1)))
+    (is (= 28 (distributed-current-value n2 f-id)))
+    (is (contains? (distributed-slot-keys n2 f-id)
+                   (tms/premise-slot-key :premise/a 2)))
+    (is (value/nothing? (strongest n3 f-id)))
+    (is (contains? (distributed-slot-keys n3 f-id)
+                   (tms/premise-slot-key :premise/d 3)))
+    (is (= 28 (distributed-current-value n4 f-id)))
+    (is (contains? (distributed-slot-keys n4 f-id)
+                   (tms/premise-slot-key :premise/d 4)))
+    (is (= #{a-id d-id}
+           #{(env/binding-id (env/lookup (:env d-retracted) 'a))
+             (env/binding-id (env/lookup (:env d-retracted) 'd))}))))
+
+(deftest compiler-2-distributed-tms-wraps-network-declaration-closure
+  (let [compile-step (fn [source env network]
+                       (let [compiled (compile-source source env {:net network})]
+                         [compiled (run-compiled compiled)]))
+        [setup n0] (compile-step
+                    "(let-cell [a b c d f]
+                       (def va 8)
+                       (def vb 3)
+                       (def vc 2)
+                       (def vd 4)
+                       (def pa :premise/a)
+                       (def pb :premise/b)
+                       (def pc :premise/c)
+                       (def pd :premise/d)
+                       (def pa0 0)
+                       (def pb0 0)
+                       (def pc0 0)
+                       (def pd0 0)
+                       (premise-input va pa pa0 a)
+                       (premise-input vb pb pb0 b)
+                       (premise-input vc pc pc0 c)
+                       (premise-input vd pd pd0 d)
+                       (def-net chain [a b c d] [out]
+                         (* (+ (- a b) c) d))
+                       (def tms-chain (tms-closure chain))
+                       (tms-chain a b c d f)
+                       f)"
+                    (default-env)
+                    (tms-distributed-protocol-net))
+        env0 (:env setup)
+        f-id (env/binding-id (env/lookup env0 'f))
+        [a-retracted n1] (compile-step
+                          "(let-cell []
+                             (def pa1 1)
+                             (premise-retract pa pa1 a)
+                             f)"
+                          env0
+                          n0)
+        [a-brought n2] (compile-step
+                        "(let-cell []
+                           (def pa2 2)
+                           (premise-believe pa pa2 a)
+                           f)"
+                        (:env a-retracted)
+                        n1)]
+    (is (= 28 (distributed-current-value n0 f-id)))
+    (is (value/nothing? (strongest n1 f-id)))
+    (is (contains? (distributed-slot-keys n1 f-id)
+                   (tms/premise-slot-key :premise/a 1)))
+    (is (= 28 (distributed-current-value n2 f-id)))
+    (is (contains? (distributed-slot-keys n2 f-id)
+                   (tms/premise-slot-key :premise/a 2)))))
+
+(deftest compiler-2-distributed-premise-closure-marks-network-output
+  (let [compile-step (fn [source env network]
+                       (let [compiled (compile-source source env {:net network})]
+                         [compiled (run-compiled compiled)]))
+        [setup n0] (compile-step
+                    "(let-cell [x out]
+                       (def vx 5)
+                       (def px :premise/input)
+                       (def pd :premise/definition)
+                       (def e0 0)
+                       (premise-input vx px e0 x)
+                       (def-net inc [x] [out]
+                         (<-> (+ x 1) out))
+                       (def apply-inc
+                         (distributed-premise-closure
+                           (network [f x] [out]
+                             (f x out))
+                           pd
+                           e0))
+                       (apply-inc inc x out)
+                       out)"
+                    (default-env)
+                    (tms-distributed-protocol-net))
+        env0 (:env setup)
+        out-id (env/binding-id (env/lookup env0 'out))
+        [definition-retracted n1] (compile-step
+                                   "(let-cell []
+                                      (def pd1 1)
+                                      (premise-retract pd pd1 out)
+                                      out)"
+                                   env0
+                                   n0)
+        [definition-brought n2] (compile-step
+                                 "(let-cell []
+                                    (def pd2 2)
+                                    (premise-believe pd pd2 out)
+                                    out)"
+                                 (:env definition-retracted)
+                                 n1)
+        [_input-retracted n3] (compile-step
+                               "(let-cell []
+                                  (def px3 3)
+                                  (premise-retract px px3 x)
+                                  out)"
+                               (:env definition-brought)
+                               n2)]
+    (is (= 6 (distributed-current-value n0 out-id)))
+    (is (contains? (distributed-slot-keys n0 out-id)
+                   (tms/premise-slot-key :premise/input 0)))
+    (is (contains? (distributed-slot-keys n0 out-id)
+                   (tms/premise-slot-key :premise/definition 0)))
+    (is (value/nothing? (strongest n1 out-id)))
+    (is (contains? (distributed-slot-keys n1 out-id)
+                   (tms/premise-slot-key :premise/definition 1)))
+    (is (= 6 (distributed-current-value n2 out-id)))
+    (is (contains? (distributed-slot-keys n2 out-id)
+                   (tms/premise-slot-key :premise/definition 2)))
+    (is (value/nothing? (strongest n3 out-id)))
+    (is (contains? (distributed-slot-keys n3 out-id)
+                   (tms/premise-slot-key :premise/input 3)))))
+
+(deftest compiler-2-distributed-tms-composes-with-behavior-arithmetic
+  (let [left (behavior-view [(hist/point-record 6 2)] #{[:left 6]})
+        right (behavior-view [(hist/point-record 6 7)] #{[:right 6]})
+        [left-id n1] (behavior-cell (behavior-tms-protocol-net) left)
+        [right-id n2] (behavior-cell n1 right)
+        env (-> (behavior-tms-env)
+                (env/bind 'left-source (env/cell-binding left-id) 0)
+                (env/bind 'right-source (env/cell-binding right-id) 0))
+        compile-step (fn [source env network]
+                       (let [compiled (compile-source source env {:net network})]
+                         [compiled (run-compiled compiled)]))
+        [setup n0] (compile-step
+                    "(let-cell [a b out]
+                       (def p-left :premise/left)
+                       (def p-right :premise/right)
+                       (def p-left0 0)
+                       (def p-right0 0)
+                       (premise-content-input left-source p-left p-left0 a)
+                       (premise-content-input right-source p-right p-right0 b)
+                       (<-> (+ a b) out)
+                       out)"
+                    env
+                    n2)
+        env0 (:env setup)
+        out-id (env/binding-id (env/lookup env0 'out))
+        [left-retracted n3] (compile-step
+                             "(let-cell []
+                                (def p-left1 1)
+                                (premise-retract p-left p-left1 a)
+                                out)"
+                             env0
+                             n0)
+        [left-brought n4] (compile-step
+                           "(let-cell []
+                              (def p-left2 2)
+                              (premise-believe p-left p-left2 a)
+                              out)"
+                           (:env left-retracted)
+                           n3)]
+    (is (= 9 (distributed-behavior-current-value n0 out-id)))
+    (is (= [{:at 6 :value 9}]
+           (distributed-behavior-records n0 out-id)))
+    (is (value/nothing? (strongest n3 out-id)))
+    (is (contains? (distributed-slot-keys n3 out-id)
+                   (tms/premise-slot-key :premise/left 1)))
+    (is (= 9 (distributed-behavior-current-value n4 out-id)))
+    (is (contains? (distributed-slot-keys n4 out-id)
+                   (tms/premise-slot-key :premise/left 2)))))
+
+(deftest execute-sub-env-reuses-behavior-arithmetic-point-join
+  (let [left (behavior-view [(hist/point-record 6 2)] #{[:a 6]})
+        right (behavior-view [(hist/point-record 6 7)] #{[:b 6]})
+        [a-id n1] (behavior-cell (behavior-protocol-net) left)
+        [b-id n2] (behavior-cell n1 right)
+        parent-env (-> (behavior-env)
+                       (env/bind 'a (env/cell-binding a-id) 0)
+                       (env/bind 'b (env/cell-binding b-id) 0))
+        outer-env (-> (default-env)
+                      (env/bind 'a (env/cell-binding a-id) 0)
+                      (env/bind 'b (env/cell-binding b-id) 0))
+        expr (execute-sub-env-ast (parse "(+ a b)") parent-env 'a 'b)
+        compiled (main/compile-expr expr outer-env {:net n2})
+        result-net (run-compiled compiled)
+        out-content (net/network-cell-content result-net (:cell compiled))]
+    (is (= 9 (behavior-current-value result-net (:cell compiled))))
+    (is (= [{:at 6 :value 9}]
+           (behavior-records out-content)))))
+
+(deftest execute-sub-env-reuses-behavior-arithmetic-point-non-continuation
+  (let [left (behavior-view [(hist/point-record 6 2)] #{[:a 6]})
+        right (behavior-view [(hist/point-record 7 7)] #{[:b 7]})
+        [a-id n1] (behavior-cell (behavior-protocol-net) left)
+        [b-id n2] (behavior-cell n1 right)
+        parent-env (-> (behavior-env)
+                       (env/bind 'a (env/cell-binding a-id) 0)
+                       (env/bind 'b (env/cell-binding b-id) 0))
+        outer-env (-> (default-env)
+                      (env/bind 'a (env/cell-binding a-id) 0)
+                      (env/bind 'b (env/cell-binding b-id) 0))
+        expr (execute-sub-env-ast (parse "(+ a b)") parent-env 'a 'b)
+        compiled (main/compile-expr expr outer-env {:net n2})
+        result-net (run-compiled compiled)]
+    (is (= value/nothing (strongest result-net (:cell compiled))))))
+
+(deftest execute-sub-env-reuses-behavior-arithmetic-late-shared-timestamp
+  (let [left-6 (behavior-view [(hist/point-record 6 2)] #{[:a 6]})
+        right-6 (behavior-view [(hist/point-record 6 7)] #{[:b 6]})
+        left-6-8 (behavior-view [(hist/point-record 6 2)
+                                 (hist/point-record 8 3)]
+                                #{[:a 6] [:a 8]})
+        right-6-8 (behavior-view [(hist/point-record 6 7)
+                                  (hist/point-record 8 10)]
+                                 #{[:b 6] [:b 8]})
+        [a-id n1] (behavior-cell (behavior-protocol-net) left-6)
+        [b-id n2] (behavior-cell n1 right-6)
+        parent-env (-> (behavior-env)
+                       (env/bind 'a (env/cell-binding a-id) 0)
+                       (env/bind 'b (env/cell-binding b-id) 0))
+        outer-env (-> (default-env)
+                      (env/bind 'a (env/cell-binding a-id) 0)
+                      (env/bind 'b (env/cell-binding b-id) 0))
+        expr (execute-sub-env-ast (parse "(+ a b)") parent-env 'a 'b)
+        compiled (main/compile-expr expr outer-env {:net n2})
+        n4 (run-compiled compiled)
+        [_left-tasks n5] (seed-behavior-message n4 a-id left-6-8)
+        [right-tasks n6] (seed-behavior-message n5 b-id right-6-8)
+        result-net (core/run-tasks right-tasks n6)
+        out-content (net/network-cell-content result-net (:cell compiled))]
+    (is (= 9 (behavior-current-value n4 (:cell compiled))))
+    (is (= 13 (behavior-current-value result-net (:cell compiled))))
+    (is (= [{:at 6 :value 9}
+            {:at 8 :value 13}]
+           (behavior-records out-content)))))
+
+(deftest compiler-2-application-can-execute-sub-env-behavior-arithmetic
+  (let [left-6 (behavior-view [(hist/point-record 6 2)] #{[:a 6]})
+        right-6 (behavior-view [(hist/point-record 6 7)] #{[:b 6]})
+        left-6-8 (behavior-view [(hist/point-record 6 2)
+                                 (hist/point-record 8 3)]
+                                #{[:a 6] [:a 8]})
+        right-6-8 (behavior-view [(hist/point-record 6 7)
+                                  (hist/point-record 8 10)]
+                                 #{[:b 6] [:b 8]})
+        [a-id n1] (behavior-cell (behavior-protocol-net) left-6)
+        [b-id n2] (behavior-cell n1 right-6)
+        inner-env (-> (behavior-env)
+                      (env/bind 'a (env/cell-binding a-id) 0)
+                      (env/bind 'b (env/cell-binding b-id) 0))
+        outer-env (-> (default-env)
+                      (env/bind 'a (env/cell-binding a-id) 0)
+                      (env/bind 'b (env/cell-binding b-id) 0))
+        outer-expr (execute-sub-env-ast (parse "(+ a b)") inner-env 'a 'b)
+        compiled (main/compile-expr outer-expr outer-env {:net n2})
+        n3 (run-compiled compiled)
+        [_left-tasks n4] (seed-behavior-message n3 a-id left-6-8)
+        [right-tasks n5] (seed-behavior-message n4 b-id right-6-8)
+        result-net (core/run-tasks right-tasks n5)
+        out-content (net/network-cell-content result-net (:cell compiled))]
+    (is (= 9 (behavior-current-value n3 (:cell compiled))))
+    (is (= 13 (behavior-current-value result-net (:cell compiled))))
+    (is (= [{:at 6 :value 9}
+            {:at 8 :value 13}]
+           (behavior-records out-content)))))
