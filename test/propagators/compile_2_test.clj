@@ -15,6 +15,7 @@
                      default-env
                      dependency-env]]
             [propagators.compiler-2.main :as main]
+            [propagators.compiler-2.operator-value :as operator-value]
             [propagators.compiler-2.parser :as parser]
             [propagators.compiler-2.behavior
              :refer [behavior-tms-env]]
@@ -431,12 +432,97 @@
       (is (= (:cell compiled) (main/compiled-result (:net compiled))))
       (is (= (:props compiled) (main/compiled-props (:net compiled)))))))
 
+(deftest compiler-2-operator-closures-replace-primitive-metadata
+  (testing "default primitive operators are explicit operator closures"
+    (let [plus (env/lookup (default-env) '+)
+          a-id (ids/new-node-id)
+          b-id (ids/new-node-id)
+          out-id (ids/new-node-id)
+          n0 (-> net/empty-net
+                 (nb/install-cell a-id 1 1)
+                 (nb/install-cell b-id 2 2))
+          [n1 prop-ids installed-out-id] ((operator-value/operator-install plus)
+                                          n0
+                                          [a-id b-id]
+                                          out-id)
+          n2 (nb/run-propagators n1 prop-ids)]
+      (is (operator-value/operator-closure? plus))
+      (is (= {:arg-ids [a-id b-id]
+              :inputs [a-id b-id]
+              :outputs [out-id]
+              :out-id out-id
+              :context-id nil}
+             (operator-value/operator-call plus [a-id b-id] out-id nil)))
+      (is (= out-id installed-out-id))
+      (is (= 3 (strongest n2 out-id)))))
+  (testing "operator closure activation and output selection are explicit slots"
+    (let [switch (env/lookup (default-env) 'switch)
+          value-id (ids/new-node-id)
+          condition-id (ids/new-node-id)
+          explicit-out-id (ids/new-node-id)
+          fallback-id (ids/new-node-id)
+          n0 (-> net/empty-net
+                 (nb/install-cell value-id 9 9)
+                 (nb/install-cell condition-id true true))
+          messages ((h/application-activate switch)
+                    n0
+                    nil
+                    [value-id condition-id explicit-out-id]
+                    fallback-id)]
+      (is (operator-value/operator-closure? switch))
+      (is (= explicit-out-id
+             (h/output-id switch
+                          [value-id condition-id explicit-out-id]
+                          fallback-id)))
+      (is (= [9] (mapv :value messages)))))
+  (testing "legacy metadata operators remain a compatibility fallback"
+    (let [out-id (ids/new-node-id)
+          legacy (with-meta
+                   (fn [network _arg-ids out-id] [network [] out-id])
+                   {h/output-selector-key
+                    (fn [_arg-ids fallback-id] [:selected fallback-id])
+                    h/application-activate-key
+                    (fn [_network _context-id _arg-ids out-id]
+                      [(message out-id :activated)])})]
+      (is (= [:selected out-id] (h/output-id legacy [] out-id)))
+      (is (= [:activated]
+             (mapv :value ((h/application-activate legacy)
+                           net/empty-net
+                           nil
+                           []
+                           out-id)))))))
+
+(deftest compiler-2-env-bound-operator-closures-are-callable
+  (let [compiled (compile-source "(let-cell [out]
+                                    (switch (+ 1 2) true out)
+                                    out)")
+        result-net (run-compiled compiled)]
+    (is (= 3 (strongest result-net (:cell compiled))))))
+
 (deftest compiler-2-default-env-uses-distributed-tms-premise-closure
   (let [compiler-env (default-env)]
-    (is (some? (env/lookup compiler-env 'premise-input)))
-    (is (some? (env/lookup compiler-env 'premise-believe)))
-    (is (some? (env/lookup compiler-env 'tms-closure)))
-    (is (some? (env/lookup compiler-env 'premise-closure)))))
+    (doseq [op ['premise-input
+                'premise-believe
+                'tms-closure
+                'premise-closure]]
+      (testing op
+        (let [operator (env/lookup compiler-env op)]
+          (is (operator-value/operator-closure? operator))
+          (is (nil? (-> operator meta h/application-activate-key))))))))
+
+(deftest compiler-2-behavior-env-uses-operator-closures
+  (let [compiler-env (behavior-tms-env)]
+    (doseq [op ['behavior-event
+                'behavior-add-event
+                'behavior-empty-state
+                'behavior-retain-last
+                'behavior
+                'behavior-cell
+                'latest]]
+      (testing op
+        (let [operator (env/lookup compiler-env op)]
+          (is (operator-value/operator-closure? operator))
+          (is (nil? (-> operator meta h/application-activate-key))))))))
 
 (deftest compiler-2-main-compiles-with-default-behavior-tms-env
   (let [compiled (main/compile-source-with-behavior-tms
