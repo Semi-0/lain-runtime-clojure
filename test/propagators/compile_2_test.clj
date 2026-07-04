@@ -937,9 +937,12 @@
       (is (= '[same next] (ast/output def-net-ast))))))
 
 (deftest compile-2-parser-supports-def-and-def-cell
-  (testing "def binds an expression, def-cell binds a zero-output closure"
+  (testing "def binds an expression, def-cell binds free cells, expressions, and zero-output closures"
     (let [def-ast (parse "(def answer (+ 1 2))")
           free-def-ast (parse "(def signal)")
+          free-def-cell-ast (parse "(def-cell signal)")
+          def-cells-ast (parse "(def-cells a b)")
+          expr-def-cell-ast (parse "(def-cell inc (cell [x] (+ x 1)))")
           closure-cell-ast (parse "(def-cell inc [x] (+ x 1))")]
       (is (= :def (ast/type def-ast)))
       (is (= 'answer (ast/name def-ast)))
@@ -947,12 +950,38 @@
       (is (= :def (ast/type free-def-ast)))
       (is (= 'signal (ast/name free-def-ast)))
       (is (nil? (ast/body free-def-ast)))
+      (is (= :def (ast/type free-def-cell-ast)))
+      (is (= 'signal (ast/name free-def-cell-ast)))
+      (is (nil? (ast/body free-def-cell-ast)))
+      (is (= :sequence (ast/type def-cells-ast)))
+      (is (= :def (ast/type expr-def-cell-ast)))
+      (is (= :network (ast/type (ast/body expr-def-cell-ast))))
       (is (= :def-cell (ast/type closure-cell-ast)))
       (is (= '[x] (ast/inputs closure-cell-ast)))
-      (is (= :apply (ast/type (ast/body closure-cell-ast)))))
+      (is (= :apply (ast/type (ast/body closure-cell-ast)))))))
+
+(deftest compile-2-parser-supports-let-conditionals-and-def-constraint
+  (testing "new immediate syntax parses onto compiler-2 AST"
+    (let [let-ast (parse "(let [x 1 y (+ x 2)] y)")
+          if-ast (parse "(if true 1 2)")
+          cond-ast (parse "(cond [false 1 else 2])")
+          constraint-ast (parse "(def-constraint same [a b] (<-> a b))")]
+      (is (= :let (ast/type let-ast)))
+      (is (= ['x 'y] (mapv first (ast/bindings let-ast))))
+      (is (= :apply (ast/type if-ast)))
+      (is (= 'if (ast/name (ast/operator if-ast))))
+      (is (= :apply (ast/type cond-ast)))
+      (is (= 'if (ast/name (ast/operator cond-ast))))
+      (is (= :def-constraint (ast/type constraint-ast)))
+      (is (= 'same (ast/name constraint-ast)))
+      (is (= '[a b] (ast/inputs constraint-ast)))))
+  (testing "invalid def-constraint syntax reports parser errors"
     (is (thrown-with-msg? clojure.lang.ExceptionInfo
-                          #"def-cell expects a name, input vector, and body"
-                          (parse "(def-cell signal)")))))
+                          #"def-constraint name must be a symbol"
+                          (parse "(def-constraint 1 [a] a)")))
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                          #"def-constraint inputs must be a vector"
+                          (parse "(def-constraint c a a)")))))
 
 (deftest compile-2-ast-accessors-accept-old-map-asts
   (testing "old AST maps normalize into slot-backed AST objects"
@@ -1015,22 +1044,98 @@
       (is (= 6 (strongest (run-compiled named) (:cell named)))))))
 
 (deftest compile-2-supports-def-and-def-cell
-  (testing "def creates named cells, and def-cell names zero-output closures"
+  (testing "def creates named cells, def-cell declares free cells, and def-cell names cell-producing expressions"
     (let [named-value (compile-source "(def answer (+ 1 2))")
           named-value-net (run-compiled named-value)
           answer-id (:binding/id (env/lookup (:env named-value) 'answer))
           free-def (compile-source "(def signal)")
           signal-id (:binding/id (env/lookup (:env free-def) 'signal))
+          free-def-cell (compile-source "(def-cell signal)")
+          free-def-cell-id (:binding/id (env/lookup (:env free-def-cell) 'signal))
+          free-def-cells (compile-source "(def-cells a b)")
+          a-id (:binding/id (env/lookup (:env free-def-cells) 'a))
+          b-id (:binding/id (env/lookup (:env free-def-cells) 'b))
+          expr-cell (compile-source "(let-cell [out]
+                                       (def-cell inc (cell [x] (+ x 1)))
+                                       (<-> (inc 4) out)
+                                       out)")
           named-cell (compile-source "(let-cell [out]
                                         (def-cell inc [x] (+ x 1))
                                         (<-> (inc 4) out)
                                         out)")
+          expr-cell-net (run-compiled expr-cell)
           named-cell-net (run-compiled named-cell)]
       (is (= (:cell named-value) answer-id))
       (is (= 3 (strongest named-value-net answer-id)))
       (is (= (:cell free-def) signal-id))
       (is (= value/nothing (strongest (:net free-def) signal-id)))
+      (is (= (:cell free-def-cell) free-def-cell-id))
+      (is (= value/nothing (strongest (:net free-def-cell) free-def-cell-id)))
+      (is (some? a-id))
+      (is (some? b-id))
+      (is (= 5 (strongest expr-cell-net (:cell expr-cell))))
       (is (= 5 (strongest named-cell-net (:cell named-cell)))))))
+
+(deftest compile-2-supports-let-conditionals-predicates-and-constraints
+  (testing "let binds expression results through ordinary cells"
+    (let [compiled (compile-source "(let [x 1
+                                          y (+ x 2)]
+                                      (+ y 3))")]
+      (is (= 6 (strongest (run-compiled compiled) (:cell compiled))))))
+  (testing "if and cond route value-level choices"
+    (let [if-compiled (compile-source "(if false 1 2)")
+          cond-compiled (compile-source "(cond [false 1
+                                                true 2
+                                                else 3])")]
+      (is (= 2 (strongest (run-compiled if-compiled) (:cell if-compiled))))
+      (is (= 2 (strongest (run-compiled cond-compiled) (:cell cond-compiled))))))
+  (testing "branch writes only the selected output"
+    (let [compiled (compile-source "(let-cell [then-out else-out]
+                                      (branch false 1 then-out 2 else-out)
+                                      else-out)")
+          n (run-compiled compiled)]
+      (is (= 2 (strongest n (:cell compiled))))))
+  (testing "predicate operators project concrete values"
+    (let [compiled (compile-source "(let-cell [a b c]
+                                      (number? 3 a)
+                                      (string? \"x\" b)
+                                      (boolean? false c)
+                                      (+ (if a 1 0)
+                                         (+ (if b 10 0)
+                                            (if c 100 0))))")]
+      (is (= 111 (strongest (run-compiled compiled) (:cell compiled))))))
+  (testing "def-constraint applications use each applicant as both input and output"
+    (let [forward (compile-source "(let-cell [a b]
+                                    (def-constraint same [x y]
+                                      (<-> x y))
+                                    (same a b)
+                                    (-> 3 a)
+                                    b)")
+          reverse (compile-source "(let-cell [a b]
+                                    (def-constraint same [x y]
+                                      (<-> x y))
+                                    (same a b)
+                                    (-> 4 b)
+                                    a)")
+          reused (compile-source "(let-cell [a b c d]
+                                   (def-constraint same [x y]
+                                     (<-> x y))
+                                   (same a b)
+                                   (same c d)
+                                   (-> 3 a)
+                                   (-> 8 c)
+                                   (+ b d))")
+          lexical (compile-source "(let-cell [x y]
+                                    (def bias 2)
+                                    (def-constraint add-bias [a out]
+                                      (<-> (+ a bias) out))
+                                    (add-bias x y)
+                                    (-> 5 x)
+                                    y)")]
+      (is (= 3 (strongest (run-compiled forward) (:cell forward))))
+      (is (= 4 (strongest (run-compiled reverse) (:cell reverse))))
+      (is (= 11 (strongest (run-compiled reused) (:cell reused))))
+      (is (= 7 (strongest (run-compiled lexical) (:cell lexical)))))))
 
 (deftest compile-2-network-requires-explicit-output-applicant
   (testing "declared-output network calls do not synthesize hidden output cells"
