@@ -5,13 +5,18 @@ compiler-2 runtime. It does not own truth and does not mutate cells directly.
 
 ## Boundary Rule
 
-An XR client may do only two runtime actions:
+An XR client may do only two normal runtime actions:
 
 - extend graph topology by sending compiler/runtime declarations;
-- send an ordinary message to an existing cell.
+- send widget events to compiler-declared widget IO propagators.
 
 Everything else is local UI state: camera, selected node, force-layout position,
 controller state, and pending command UI.
+
+`xr/send-message` still exists as a compatibility/testing command, but the web
+panel no longer exposes it as the normal interaction path. Browser-originated
+behavior input should go through widget IO so compiler/runtime code declares
+which cells may receive external events.
 
 ## Runtime Bridge
 
@@ -25,11 +30,43 @@ Supported XR operations:
 - `xr/trace/read` reads the current projection for an installed trace;
 - `xr/extend-graph` appends compiler-2 source to the XR source list and
   recompiles the accumulated program;
+- `xr/widget-event` sends `{widget-id, channel, value}` to a registered widget
+  IO source; the runtime assigns epochs and injects behavior events;
 - `xr/send-message` sends one value, behavior event, or distributed TMS premise
-  fact into a target cell.
+  fact into a target cell as a compatibility path.
 
 The bridge speaks JSON to the browser. Cell ids are serialized as strings, and
 semantic graph values are projected into browser-friendly node/edge records.
+
+## Known Fragility And Projection Boundary
+
+The propagation scheduler is synchronous and intentionally small: a commit
+merges cell messages, wakes downstream propagators, and drains the task queue.
+The fragile part is the runtime/effect/projection layer around it. `xr-io` is an
+effect/output path, not an XR input commit path; it emits an XR launch request
+after propagation. If that request carries large trace values, the TUI command
+that caused it can appear stuck while runtime projection or JSON delivery runs.
+
+Trace topology must not carry raw runtime cell content. Cell content is merge
+evidence and may contain behavior history, TMS facts, closures, or network-like
+values. XR and TUI projections may expose only strongest-derived lightweight
+summaries. In short:
+
+```text
+cell content  -> internal merge/evidence substrate
+cell strongest -> readable current truth
+XR/TUI value   -> projection-safe summary of strongest
+```
+
+The target runtime cycle is:
+
+```text
+commit external input -> propagate -> collect boundary effects -> project TUI/XR
+```
+
+Both TUI and XR should consume that completed transaction result, including
+explicit changed cell/node ids for UI pulses. Browser glow must not depend on
+diffing serialized raw cell values.
 
 ## Compiler-2 Runtime Operator
 
@@ -87,18 +124,45 @@ The web side is plain JavaScript modules using The Elm Architecture:
 
 The first projection is a normal 3D browser view. WebXR is layered on top after
 that view works. Pinch recognition updates selection state first; committed
-actions still go back through `xr/extend-graph` or `xr/send-message`.
+actions still go back through `xr/extend-graph` or `xr/widget-event`.
 
 The browser view also has a mouse test path for IO. Click a node in the 3D
-canvas, enter a JSON scalar or string value, and send it to the selected node.
-This uses the same `xr/send-message` runtime command as XR gestures, so message
-passing can be tested without a headset.
+canvas to select it. Compiler-declared widget nodes render as sliders in the 3D
+scene and in the side panel. Dragging a slider sends `xr/widget-event`, not a
+raw cell mutation, so message passing can be tested without a headset while
+still respecting the widget IO boundary.
+
+## Widget IO
+
+The live compiler-2 runtime binds two XR widget operators:
+
+```clojure
+(slider-io "gain" gain gain-events)
+
+(slider-panel-io "mix"
+  "a" a a-events
+  "b" b b-events
+  "c" c c-events)
+```
+
+`slider-io` registers one channel named `value`. `slider-panel-io` registers a
+multi-channel panel. Each channel has a view cell, used for display/feedback,
+and an event-source cell, used for external input. During propagation these
+operators emit `:xr/widget-register` boundary effects; the runtime effect stage
+records a widget registry and augments the semantic graph with widget metadata.
+
+The browser may only send a widget id, channel, and value. The runtime resolves
+that pair through the registry, assigns the next widget epoch, and writes
+ordinary behavior event-source updates. For a slider panel, every channel edit
+re-emits the latest known values for all channels at the same epoch. That keeps
+multi-input behavior arithmetic fresh without changing behavior arithmetic's
+existing sparse-history rule that point events do not automatically continue.
 
 The desktop 3D view remains available even when XR is unsupported. It renders
 cells as white illuminated spheres and propagators/operators as white
-illuminated triangles on a black background. Mouse controls in 3D mode are:
-left-drag to rotate, wheel to zoom, and right/middle/shift-drag to pan. The
-`3D View` / `XR View` toggle changes presentation mode without changing the
+illuminated triangles on a black background. Camera controls in 3D mode use
+Three.js `OrbitControls`: left-drag rotates, wheel zooms, and right-drag pans.
+The `3D View` / `XR View` toggle changes presentation mode without changing the
 runtime graph model. When a cell appears or receives a changed value in a graph
 snapshot, it briefly blooms with a white halo and then fades back to normal.
 On graph load, the camera frames the current graph center; once the user moves
