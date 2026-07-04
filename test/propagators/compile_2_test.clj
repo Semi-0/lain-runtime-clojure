@@ -741,6 +741,49 @@
     (is (= [{:at 10 :value 5}]
            (behavior-records (net/network-cell-content n (:cell compiled)))))))
 
+(deftest compiler-2-be-latest-zero-arg-builds-empty-latest-behavior
+  (let [compiled (main/compile-source-with-behavior-tms
+                  "(be:latest)"
+                  {:net (behavior-tms-protocol-net)})
+        n (run-compiled compiled)
+        content (net/network-cell-content n (:cell compiled))]
+    (is (= value/nothing (behavior-current-value n (:cell compiled))))
+    (is (= [] (behavior-records content)))))
+
+(deftest compiler-2-behavior-declaration-sugar-retains-latest-events
+  (testing "def-behavior creates the behavior view and sibling event source"
+    (let [compiled (main/compile-source-with-behavior-tms
+                    "(def-behavior a)"
+                    {:net (behavior-tms-protocol-net)})]
+      (is (some? (env/lookup (:env compiled) 'a)))
+      (is (some? (env/lookup (:env compiled) 'a-events)))))
+  (testing "define-behaviors wires each event source into a latest-retaining behavior"
+    (let [compiled (main/compile-source-with-behavior-tms
+                    "(let-cell [out]
+                       (define-behaviors a b c)
+                       (behavior-event 1 10 a-events)
+                       (behavior-event 1 4 b-events)
+                       (behavior-event 1 3 c-events)
+                       (<-> (- (+ a b) c) out)
+                       out)"
+                    {:net (behavior-tms-protocol-net)})
+          n (run-compiled compiled)]
+      (is (= 11 (behavior-current-value n (:cell compiled))))
+      (is (= [{:at 1 :value 10}]
+             (behavior-records
+              (net/network-cell-content
+               n
+               (-> compiled :env (env/lookup 'a) env/binding-id)))))))
+  (testing "let-behaviour scopes behavior views and sibling event sources"
+    (let [compiled (main/compile-source-with-behavior-tms
+                    "(let-behaviour [a b]
+                       (behavior-event 1 2 a-events)
+                       (behavior-event 1 3 b-events)
+                       (+ a b))"
+                    {:net (behavior-tms-protocol-net)})
+          n (run-compiled compiled)]
+      (is (= 5 (behavior-current-value n (:cell compiled)))))))
+
 (deftest compiler-2-behavior-syntax-history-slices-return-behaviors
   (let [base-source "(let-cell [events retained out]
                        (def-net retain-all [acc next] [out]
@@ -1012,6 +1055,17 @@
       (is (= :def-cell (ast/type closure-cell-ast)))
       (is (= '[x] (ast/inputs closure-cell-ast)))
       (is (= :apply (ast/type (ast/body closure-cell-ast)))))))
+
+(deftest compile-2-parser-supports-behavior-sugar
+  (testing "behavior declaration aliases lower to ordinary compiler-2 sequences"
+    (doseq [source ["(def-behavior a)"
+                   "(def-behaviour a)"
+                   "(def-behaviors a b c)"
+                   "(define-behaviors a b c)"
+                   "(let-behaviour [a b] (+ a b))"
+                   "(let-behavior [a b] (+ a b))"]]
+      (is (#{:sequence :let-cell} (ast/type (parse source)))
+          source))))
 
 (deftest compile-2-parser-supports-let-conditionals-and-def-constraint
   (testing "new immediate syntax parses onto compiler-2 AST"

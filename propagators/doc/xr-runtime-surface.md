@@ -137,17 +137,21 @@ still respecting the widget IO boundary.
 
 ## Widget IO
 
-The live compiler-2 runtime binds two XR widget operators:
+The live compiler-2 runtime binds three XR widget operators:
 
 ```clojure
 (io:slider gain)
 
-(io:slider-panel "mix" (list a b c))
+(io:slider-panel a b c)
+(io:slider-panel-name "mix" a b c)
 ```
 
 These are the expression-facing forms. `io:slider` returns the same value cell
 it registers; `io:slider-panel` returns a generated panel descriptor cell.
-Widget and channel names default from env symbol names where possible.
+`io:slider-panel` uses widget id `"slider-panel-0"`; use
+`io:slider-panel-name` for an explicit id. Channel names default from env symbol
+names where possible. When a panel argument is a behavior view cell such as
+`a`, widget events route into sibling `a-events` if that cell is bound.
 
 The lower-level compatibility forms are still available when display feedback
 and event input need to be separate cells:
