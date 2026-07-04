@@ -76,8 +76,7 @@ operator:
 ```clojure
 (let-cell [g]
   (trace a g)
-  (io:xr g receipt)
-  receipt)
+  (io:xr g))
 ```
 
 `io:xr` is intentionally not direct socket IO. During propagation it writes a
@@ -86,7 +85,9 @@ quiesces, the runtime effect period reads the outbox, schedules one
 `:xr/launch-trace` delivery per receipt/epoch, and writes a receipt fact back
 to the requested receipt cell.
 
-`xr-io` remains available as the older compatibility spelling.
+`io:xr` takes exactly one graph cell and returns the generated receipt cell.
+`xr-io` remains available as the older compatibility spelling when an explicit
+receipt target is needed.
 
 The receipt cell is a compound object keyed by stable receipt slots. This keeps
 multiple launches monotone instead of overwriting a plain value.
@@ -100,19 +101,18 @@ Runtime clients can inspect delivered XR requests with:
 The receipt may be an ordinary expression/local output:
 
 ```clojure
-(let-cell [g r]
+(let-cell [g]
   (trace out g)
-  (io:xr g r)
-  r)
+  (io:xr g))
 ```
 
-or a runtime-visible cell binding:
+The legacy spelling can still target a runtime-visible receipt cell:
 
 ```clojure
 (def receipt)
 (let-cell [g]
   (trace out g)
-  (io:xr g receipt)
+  (xr-io g receipt)
   receipt)
 ```
 
@@ -142,7 +142,7 @@ The live compiler-2 runtime binds two XR widget operators:
 ```clojure
 (io:slider gain)
 
-(io:slider-panel "mix" [a b c])
+(io:slider-panel "mix" (list a b c))
 ```
 
 These are the expression-facing forms. `io:slider` returns the same value cell

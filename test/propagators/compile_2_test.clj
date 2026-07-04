@@ -678,7 +678,7 @@
                   (behavior-event 6 2 events)
                   (behavior-event 8 3 events)
                   (behavior-event 10 5 events)
-                  (behavior-cell events (behavior-empty-state) retain-all retained)
+                  (be:behavior-cell events (behavior-empty-state) retain-all retained)
                   %s
                   out)"
         compiled (main/compile-source-with-behavior-tms
@@ -695,6 +695,51 @@
       (is (= 3 (behavior-current-value n (:cell compiled))))
       (is (= [{:at 8 :value 3}]
              (behavior-records (net/network-cell-content n (:cell compiled))))))))
+
+(deftest compiler-2-behavior-prefixed-projections-are-behaviors
+  (let [source "(let-cell [events retained out]
+                  (def-net retain-all [acc next] [out]
+                    (behavior-add-event acc next out))
+                  (behavior-event 6 2 events)
+                  (behavior-event 8 3 events)
+                  (behavior-event 10 5 events)
+                  (behavior-cell events (behavior-empty-state) retain-all retained)
+                  %s
+                  out)"
+        compile-projection (fn [body]
+                             (let [compiled (main/compile-source-with-behavior-tms
+                                             (format source body)
+                                             {:net (behavior-tms-protocol-net)})]
+                               [compiled (run-compiled compiled)]))]
+    (let [[compiled n] (compile-projection
+                        "(<-> (+ (be:latest retained) (be:latest retained)) out)")]
+      (is (= 10 (behavior-current-value n (:cell compiled))))
+      (is (= [{:at 10 :value 10}]
+             (behavior-records (net/network-cell-content n (:cell compiled))))))
+    (let [[compiled n] (compile-projection "(be:last retained 1 out)")]
+      (is (= 3 (behavior-current-value n (:cell compiled))))
+      (is (= [{:at 8 :value 3}]
+             (behavior-records (net/network-cell-content n (:cell compiled))))))
+    (let [[compiled n] (compile-projection "(be:history retained 1 3 out)")]
+      (is (= 5 (behavior-current-value n (:cell compiled))))
+      (is (= [{:at 8 :value 3}
+              {:at 10 :value 5}]
+             (behavior-records (net/network-cell-content n (:cell compiled))))))))
+
+(deftest compiler-2-behavior-prefixed-constructor-builds-behavior
+  (let [compiled (main/compile-source-with-behavior-tms
+                  "(let-cell [events retained]
+                     (def-net retain-all [acc next] [out]
+                       (behavior-add-event acc next out))
+                     (behavior-event 6 2 events)
+                     (behavior-event 10 5 events)
+                     (be:behavior events retain-all (behavior-empty-state) retained)
+                     (be:latest retained))"
+                  {:net (behavior-tms-protocol-net)})
+        n (run-compiled compiled)]
+    (is (= 5 (behavior-current-value n (:cell compiled))))
+    (is (= [{:at 10 :value 5}]
+           (behavior-records (net/network-cell-content n (:cell compiled)))))))
 
 (deftest compiler-2-behavior-syntax-history-slices-return-behaviors
   (let [base-source "(let-cell [events retained out]
@@ -744,6 +789,14 @@
         sugar-net (run-compiled sugar)]
     (is (= 3 (strongest explicit-net (:cell explicit))))
     (is (= 3 (strongest sugar-net (:cell sugar))))))
+
+(deftest compile-2-list-builds-cons-chain
+  (let [compiled (compile-source "(let-cell [xs tail]
+                                    (def xs (list 1 2 3))
+                                    (p:cdr tail xs)
+                                    (+ (p:car xs) (p:car tail)))")
+        n (run-compiled compiled)]
+    (is (= 3 (strongest n (:cell compiled))))))
 
 (deftest compile-2-exposes-generic-slot
   (let [compiled (compile-source "(let-cell [obj]
@@ -1714,6 +1767,23 @@
     (let [compiled (compile-source "(let-cell [out]
                                       (-> 42 out)
                                       out)")
+          result-net (run-compiled compiled)]
+      (is (= 42 (strongest result-net (:cell compiled)))))))
+
+(deftest compile-2-supports-forward-sync-chain
+  (testing "-> installs a one-way chain and returns the last cell"
+    (let [compiled (compile-source "(let-cell [a b c]
+                                      (-> 42 a b c)
+                                      c)")
+          result-net (run-compiled compiled)]
+      (is (= 42 (strongest result-net (:cell compiled)))))))
+
+(deftest compile-2-supports-bi-sync-chain
+  (testing "<-> installs adjacent bidirectional links and returns the last cell"
+    (let [compiled (compile-source "(let-cell [a b c]
+                                      (<-> a b c)
+                                      (<-> c 42)
+                                      a)")
           result-net (run-compiled compiled)]
       (is (= 42 (strongest result-net (:cell compiled)))))))
 
