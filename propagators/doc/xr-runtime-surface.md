@@ -70,20 +70,23 @@ diffing serialized raw cell values.
 
 ## Compiler-2 Runtime Operator
 
-The live compiler-2 runtime also binds `xr-io` as a runtime-only operator:
+The live compiler-2 runtime binds `io:xr` as the expression-facing XR boundary
+operator:
 
 ```clojure
 (let-cell [g]
   (trace a g)
-  (xr-io g receipt)
+  (io:xr g receipt)
   receipt)
 ```
 
-`xr-io` is intentionally not direct socket IO. During propagation it writes a
+`io:xr` is intentionally not direct socket IO. During propagation it writes a
 boundary-effect request into the runtime XR outbox. After propagation
 quiesces, the runtime effect period reads the outbox, schedules one
 `:xr/launch-trace` delivery per receipt/epoch, and writes a receipt fact back
 to the requested receipt cell.
+
+`xr-io` remains available as the older compatibility spelling.
 
 The receipt cell is a compound object keyed by stable receipt slots. This keeps
 multiple launches monotone instead of overwriting a plain value.
@@ -99,7 +102,7 @@ The receipt may be an ordinary expression/local output:
 ```clojure
 (let-cell [g r]
   (trace out g)
-  (xr-io g r)
+  (io:xr g r)
   r)
 ```
 
@@ -109,7 +112,7 @@ or a runtime-visible cell binding:
 (def receipt)
 (let-cell [g]
   (trace out g)
-  (xr-io g receipt)
+  (io:xr g receipt)
   receipt)
 ```
 
@@ -137,6 +140,19 @@ still respecting the widget IO boundary.
 The live compiler-2 runtime binds two XR widget operators:
 
 ```clojure
+(io:slider gain)
+
+(io:slider-panel "mix" [a b c])
+```
+
+These are the expression-facing forms. `io:slider` returns the same value cell
+it registers; `io:slider-panel` returns a generated panel descriptor cell.
+Widget and channel names default from env symbol names where possible.
+
+The lower-level compatibility forms are still available when display feedback
+and event input need to be separate cells:
+
+```clojure
 (slider-io "gain" gain gain-events)
 
 (slider-panel-io "mix"
@@ -145,11 +161,9 @@ The live compiler-2 runtime binds two XR widget operators:
   "c" c c-events)
 ```
 
-`slider-io` registers one channel named `value`. `slider-panel-io` registers a
-multi-channel panel. Each channel has a view cell, used for display/feedback,
-and an event-source cell, used for external input. During propagation these
-operators emit `:xr/widget-register` boundary effects; the runtime effect stage
-records a widget registry and augments the semantic graph with widget metadata.
+All widget operators emit `:xr/widget-register` boundary effects during
+propagation; the runtime effect stage records a widget registry and augments the
+semantic graph with widget metadata.
 
 The browser may only send a widget id, channel, and value. The runtime resolves
 that pair through the registry, assigns the next widget epoch, and writes
@@ -175,7 +189,7 @@ Run the integrated runtime with:
 clojure -M:wired/server
 ```
 
-When compiler-2 code installs an `xr-io` propagator and it emits an XR launch
+When compiler-2 code installs an `io:xr` propagator and it emits an XR launch
 effect, the runtime server starts an XR/browser projection server against the
 same runtime session. Connected browser clients subscribe to XR launch effects
 and receive the latest launch graph immediately, then receive updated launch
