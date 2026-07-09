@@ -42,6 +42,15 @@
   [n id]
   (net/network-cell-strongest n id))
 
+(defn- prop-count
+  [n]
+  (count (filter prop/prop? (vals (net/net-env n)))))
+
+(defn- seed-and-run
+  [n id v]
+  (let [[tasks n'] (core/eval-cell id (message id v) n)]
+    (core/run-tasks tasks n')))
+
 (defn- seeded-cell
   [n v]
   (let [id (ids/new-node-id)]
@@ -1313,12 +1322,16 @@
   (testing "new immediate syntax parses onto compiler-2 AST"
     (let [let-ast (parse "(let [x 1 y (+ x 2)] y)")
           if-ast (parse "(if true 1 2)")
+          when-ast (parse "(when ready (<-> 1 out))")
           cond-ast (parse "(cond [false 1 else 2])")
           constraint-ast (parse "(def-constraint same [a b] (<-> a b))")]
       (is (= :let (ast/type let-ast)))
       (is (= ['x 'y] (mapv first (ast/bindings let-ast))))
       (is (= :apply (ast/type if-ast)))
       (is (= 'if (ast/name (ast/operator if-ast))))
+      (is (= :when-topology (ast/type when-ast)))
+      (is (= 'ready (ast/name (ast/condition when-ast))))
+      (is (= :apply (ast/type (ast/body when-ast))))
       (is (= :apply (ast/type cond-ast)))
       (is (= 'if (ast/name (ast/operator cond-ast))))
       (is (= :def-constraint (ast/type constraint-ast)))
@@ -1379,6 +1392,104 @@
              (obj/slot-value app-info main/application-lowering-slot)))
       (is (contains? (set (:props compiled)) (first apply-props)))
       (is (= 5 (strongest result-net (:cell compiled)))))))
+
+(deftest compile-2-presence-when-delays-body-topology
+  (testing "when compiles the condition immediately and installs body topology only after a usable value"
+    (let [expr (ast/sequence*
+                (parse "(def-cells trigger out)")
+                (parse "(when trigger (-> 1 out))")
+                (parse "out"))
+          compiled (main/compile-expr expr)
+          trigger-id (:binding/id (env/lookup (:env compiled) 'trigger))
+          out-id (:binding/id (env/lookup (:env compiled) 'out))
+          n0 (run-compiled compiled)
+          before-props (prop-count n0)]
+      (is (= value/nothing (strongest n0 out-id)))
+      (let [n1 (seed-and-run n0 trigger-id false)
+            after-props (prop-count n1)]
+        (is (= 1 (strongest n1 out-id)))
+        (is (< before-props after-props))
+        (is (= after-props
+               (prop-count (seed-and-run n1 trigger-id :still-present))))))))
+
+(deftest compile-2-forward-sync-propagates-false
+  (testing "false is a usable value, so -> must not treat it as missing"
+    (let [compiled (compile-source "(let-cell [out]
+                                      (-> false out)
+                                      out)")
+          result-net (run-compiled compiled)]
+      (is (= false (strongest result-net (:cell compiled))))))
+  (testing "false also propagates through a closure output"
+    (let [compiled (compile-source "(let-cell [out]
+                                      (def-net f [x] [out]
+                                        (-> (<= x 1) out))
+                                      (f 2 out)
+                                      out)")
+          result-net (run-compiled compiled)]
+      (is (= false (strongest result-net (:cell compiled)))))))
+
+(deftest compile-2-named-closures-capture-copied-live-env
+  (testing "a named closure's copied env contains its own binding"
+    (let [compiled (compile-source "(def-net self [n] [out]
+                                      (when n (self n out)))")
+          self-id (:binding/id (env/lookup (:env compiled) 'self))
+          closure-info (strongest (:net compiled) self-id)
+          closure-env (closure-value/closure-env closure-info)]
+      (is (= self-id
+             (:binding/id (env/lookup closure-env 'self))))))
+  (testing "same-scope later declarations propagate into the copied env"
+    (let [compiled (compile-source "(let-cell [result]
+                                      (def-net first [x] [out]
+                                        (later x out))
+                                      (def-net later [x] [out]
+                                        (-> (+ x 1) out))
+                                      first)")
+          result-net (run-compiled compiled)
+          first-id (:binding/id (env/lookup (:env compiled) 'first))
+          later-id (:binding/id (env/lookup (:env compiled) 'later))
+          closure-info (strongest result-net first-id)
+          closure-env (closure-value/closure-env closure-info)]
+      (is (= later-id
+             (:binding/id (env/lookup closure-env 'later)))))))
+
+(deftest compile-2-presence-when-supports-direct-recursive-style
+  (testing "ordinary self-application inside presence-gated topology can terminate"
+    (let [compiled (compile-source "(let-cell [out]
+                                      (def-net down [n] [out]
+                                        (let-cell [base? recur? a]
+                                          (-> (<= n 1) base?)
+                                          (-> (not base?) recur?)
+                                          (when (switch true base?)
+                                            (-> n out))
+                                          (when (switch true recur?)
+                                            (down (- n 1) a)
+                                            (-> a out))))
+                                      (down 4 out)
+                                      out)")
+          result-net (run-compiled compiled)]
+      (is (= 1 (strongest result-net (:cell compiled)))))))
+
+(deftest compile-2-presence-when-supports-fib-style-gur
+  (testing "fib uses only closure self-application plus switch-gated when bodies"
+    (doseq [[n expected] [[0 0] [1 1] [5 5] [6 8]]]
+      (let [compiled (compile-source
+                      (format "(let-cell [out]
+                                 (def-net fib [n] [out]
+                                   (let-cell [base? recur? a b]
+                                     (-> (<= n 1) base?)
+                                     (-> (not base?) recur?)
+                                     (when (switch true base?)
+                                       (-> n out))
+                                     (when (switch true recur?)
+                                       (fib (- n 1) a)
+                                       (fib (- n 2) b)
+                                       (-> (+ a b) out))))
+                                 (fib %d out)
+                                 out)"
+                              n))
+            result-net (run-compiled compiled)]
+        (is (= expected (strongest result-net (:cell compiled)))
+            (str "fib " n))))))
 
 (deftest compile-2-supports-first-slice-network-and-def-net
   (testing "network output cells are explicit application applicants"
