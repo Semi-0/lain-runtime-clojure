@@ -872,6 +872,90 @@
         n (run-compiled compiled)]
     (is (= 3 (strongest n (:cell compiled))))))
 
+(deftest compile-2-cdr-gated-list-gur-hop-chain
+  (testing "compiler-2 structural GUR should use cdr presence as the lazy hop guard"
+    (let [compiled
+          (compile-source "(let-cell [xs node1 tail hop1 out first rest second]
+                            (def-net inc-list [xs] [out]
+                              (let-cell [head rest mapped-head mapped-rest]
+                                (p:car head xs)
+                                (p:cdr rest xs)
+                                (-> (+ head 1) mapped-head)
+                                (p:cons mapped-head mapped-rest out)
+                                (when rest
+                                  (inc-list rest mapped-rest))))
+                            (p:cons 2 tail node1)
+                            (p:cons 1 node1 xs)
+                            (inc-list xs hop1)
+                            (inc-list hop1 out)
+                            (p:car first out)
+                            (p:cdr rest out)
+                            (p:car second rest)
+                            (+ (* first 10) second))")
+          n (run-compiled compiled)]
+      (is (= 34 (strongest n (:cell compiled)))))))
+
+(defn- compile-2-map-chain-source
+  [depth]
+  (let [value-count 5
+        node-syms (mapv #(symbol (str "node" %)) (range 1 value-count))
+        hop-syms (mapv #(symbol (str "hop" %)) (range 1 depth))
+        value-syms (mapv #(symbol (str "v" %)) (range value-count))
+        rest-syms (mapv #(symbol (str "rest" %)) (range (dec value-count)))
+        cells (vec (concat ['xs 'tail]
+                           node-syms
+                           hop-syms
+                           ['out]
+                           value-syms
+                           rest-syms))
+        double-list
+        '(def-net double-list [xs] [out]
+           (let-cell [head rest mapped-head mapped-rest]
+             (p:car head xs)
+             (p:cdr rest xs)
+             (-> (* head 2) mapped-head)
+             (p:cons mapped-head mapped-rest out)
+             (when rest
+               (double-list rest mapped-rest))))
+        cons-forms
+        (mapv (fn [coll tail]
+                (list 'p:cons 1 tail coll))
+              (into ['xs] node-syms)
+              (conj node-syms 'tail))
+        chain-forms
+        (mapv (fn [in out]
+                (list 'double-list in out))
+              (into ['xs] hop-syms)
+              (conj hop-syms 'out))
+        read-forms
+        (mapcat
+         (fn [idx]
+           (let [current (if (zero? idx)
+                           'out
+                           (rest-syms (dec idx)))
+                 car-form (list 'p:car (value-syms idx) current)]
+             (if (< idx (dec value-count))
+               [car-form (list 'p:cdr (rest-syms idx) current)]
+               [car-form])))
+         (range value-count))
+        result-form (cons '+ value-syms)]
+    (pr-str (cons 'let-cell
+                  (cons cells
+                        (concat [double-list]
+                                cons-forms
+                                chain-forms
+                                read-forms
+                                [result-form]))))))
+
+(deftest compile-2-cdr-gated-list-map-chain-depths
+  (testing "compiler-2 map chains match the accumulating GUR hop depths"
+    (doseq [depth [5 10 15]]
+      (let [compiled (compile-source (compile-2-map-chain-source depth))
+            n (run-compiled compiled)
+            expected (* 5 (long (Math/pow 2 depth)))]
+        (is (= expected (strongest n (:cell compiled)))
+            (str "map-chain depth " depth))))))
+
 (deftest compile-2-exposes-generic-slot
   (let [compiled (compile-source "(let-cell [obj]
                                     (p:slot :x 7 obj)
