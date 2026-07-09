@@ -211,6 +211,44 @@ clojure -M:wired/xr
 
 Then open `http://127.0.0.1:45666/`.
 
+For LAN testing, bind the XR projection to all interfaces:
+
+```text
+clojure -M:wired/server --xr --xr-lan
+```
+
+or for the standalone projection:
+
+```text
+clojure -M -m graph.xr-server --lan
+```
+
+The server binds `0.0.0.0`, but clients should visit the machine's LAN address,
+for example `http://192.168.1.23:45666/`.
+
+For HTTPS, provide a Java keystore. A local self-signed keystore can be created
+with:
+
+```text
+keytool -genkeypair -alias xr-local -keyalg RSA -keysize 2048 -storetype PKCS12 -keystore xr-local.p12 -storepass changeit -keypass changeit -validity 365 -dname "CN=192.168.1.23" -ext "SAN=ip:192.168.1.23,dns:localhost,ip:127.0.0.1"
+```
+
+Then run:
+
+```text
+clojure -M:wired/server --xr --xr-lan --xr-https --xr-keystore xr-local.p12 --xr-keystore-password changeit
+```
+
+or standalone:
+
+```text
+clojure -M -m graph.xr-server --lan --https --keystore xr-local.p12 --keystore-password changeit
+```
+
+Clients should visit `https://<machine-lan-ip>:45666/`. Headset browsers still
+need to trust the certificate authority or accept the certificate before WebXR
+will treat the page as secure.
+
 ## Future Session Boundary
 
 The current lazy launch path deliberately shares the compiler-2 runtime session
