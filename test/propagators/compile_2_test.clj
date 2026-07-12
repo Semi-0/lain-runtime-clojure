@@ -1449,9 +1449,36 @@
       (is (not (closure/closure? closure-info)))
       (is (nil? (obj/slot-value closure-info main/closure-runtime-slot)))
       (is (= '[x] (obj/slot-value closure-info main/closure-inputs-slot)))
-      (is (= :apply
-             (ast/type (obj/slot-value closure-info
-                                       main/closure-body-slot)))))))
+      (let [output (obj/slot-value closure-info main/closure-output-slot)
+            body (obj/slot-value closure-info main/closure-body-slot)]
+        (is (= 1 (count output)))
+        (is (closure-value/implicit-return-symbol? (first output)))
+        (is (= :apply (ast/type body)))
+        (is (= '->
+               (ast/name (ast/operator body))))))))
+
+(deftest compile-2-implicit-return-closure-rewrites-final-body-form
+  (testing "implicit return is ordinary output syntax over only the last body form"
+    (let [compiled (compile-source "(:: [x] (-> 1 x) (+ x 1))")
+          closure-info (strongest (:net compiled) (:cell compiled))
+          [hidden] (obj/slot-value closure-info main/closure-output-slot)
+          body (obj/slot-value closure-info main/closure-body-slot)
+          forms (ast/body body)
+          first-form (first forms)
+          return-form (second forms)]
+      (is (closure-value/implicit-return-symbol? hidden))
+      (is (= :sequence (ast/type body)))
+      (is (= 2 (count forms)))
+      (is (= '->
+             (ast/name (ast/operator first-form))))
+      (is (= 'x
+             (ast/name (last (ast/args first-form)))))
+      (is (= '->
+             (ast/name (ast/operator return-form))))
+      (is (= '+
+             (ast/name (ast/operator (first (ast/args return-form))))))
+      (is (= hidden
+             (ast/name (last (ast/args return-form))))))))
 
 (deftest compile-2-closure-declaration-alone-does-not-evaluate-body
   (testing "declaring a network closure only installs closure data/slot topology"
@@ -1831,7 +1858,7 @@
              updated-chain)))))
 
 (deftest compile-2-lexical-access-emits-frame-scope-candidates
-  (testing "lexical access emits only the nearest declared frame candidate"
+  (testing "lexical access retains declarations and selects the nearest candidate"
     (let [parent-id (ids/new-node-id)
           child-id (ids/new-node-id)
           env-id (ids/new-node-id)
@@ -1848,7 +1875,7 @@
           content (net/network-cell-content n2 out-id)
           selected (strongest n2 out-id)]
       (is (scope-source/scope-content? content))
-      (is (= 1 (scoped-candidate-count content)))
+      (is (= 2 (scoped-candidate-count content)))
       (is (scope-source/scope-value? selected))
       (is (= child-id (:binding/id (scoped-base selected)))))))
 
@@ -2075,6 +2102,69 @@
       (is (scope-source/scope-value? selected))
       (is (= child-x-id (:binding/id (scoped-base selected))))
       (is (= 1 (scoped-candidate-count (net/network-cell-content n6 out-id)))))))
+
+(deftest compile-2-local-first-lexical-access-emits-raw-nearest-binding
+  (testing "local-first access is for compiler dispatch, so it returns a raw binding"
+    (let [parent-x-id (ids/new-node-id)
+          child-x-id (ids/new-node-id)
+          env-id (ids/new-node-id)
+          out-id (ids/new-node-id)
+          lexical-env (-> (default-env)
+                          (env/bind 'x (env/cell-binding parent-x-id) 0)
+                          env/enter-scope
+                          (env/bind 'x (env/cell-binding child-x-id)))
+          n0 (-> (scope-source-protocol-net)
+                 (install-empty-cells [env-id out-id])
+                 (nb/seed-cell env-id lexical-env))
+          [access-prop n1] ((env/p:lexical-access-local-first 'x env-id out-id)
+                            n0)
+          n2 (nb/run-propagators n1 (installed-prop-ids access-prop))]
+      (is (= (env/cell-binding child-x-id)
+             (strongest n2 out-id)))
+      (is (not (scope-source/scope-value? (strongest n2 out-id)))))))
+
+(deftest compile-2-local-first-lexical-access-blocks-parent-before-local-value
+  (testing "a declared local frame wins even while its binding value is pending"
+    (let [parent-x-id (ids/new-node-id)
+          child-x-id (ids/new-node-id)
+          parent-env-id (ids/new-node-id)
+          inherited-env-id (ids/new-node-id)
+          child-binding-id (ids/new-node-id)
+          scoped-env-id (ids/new-node-id)
+          out-id (ids/new-node-id)
+          parent-env (env/bind (default-env)
+                               'x
+                               (env/cell-binding parent-x-id)
+                               0)
+          n0 (-> (scope-source-protocol-net)
+                 (install-empty-cells [parent-env-id
+                                       inherited-env-id
+                                       child-binding-id
+                                       scoped-env-id
+                                       out-id])
+                 (nb/seed-cell parent-env-id parent-env))
+          [sub-prop n1] ((env/p:sub-env parent-env-id inherited-env-id) n0)
+          [bind-prop n2] ((env/p:bind-local
+                           'x
+                           inherited-env-id
+                           child-binding-id
+                           scoped-env-id)
+                          n1)
+          [access-prop n3] ((env/p:lexical-access-local-first
+                             'x
+                             scoped-env-id
+                             out-id)
+                            n2)
+          n4 (nb/run-propagators n3
+                                 (into (into (installed-prop-ids sub-prop)
+                                             (installed-prop-ids bind-prop))
+                                       (installed-prop-ids access-prop)))
+          n5 (nb/seed-cell n4 child-binding-id (env/cell-binding child-x-id))
+          n6 (nb/run-propagators n5
+                                 (nb/neighbor-propagator-ids n5 child-binding-id))]
+      (is (= value/nothing (strongest n4 out-id)))
+      (is (= (env/cell-binding child-x-id)
+             (strongest n6 out-id))))))
 
 (deftest compile-2-lexical-compound-uses-env-slot-not-hidden-captures
   (testing "compound declarations attach lexical env through slots, not hidden application inputs"
@@ -3513,6 +3603,28 @@
     (is (= 9 (behavior-current-value result-net (:cell compiled))))
     (is (= [{:at 6 :value 9}]
            (behavior-records out-content)))))
+
+(deftest lexical-binding-access-preserves-and-refines-provenance
+  (let [answer-id (ids/new-node-id)
+        bound-id (ids/new-node-id)
+        out-id (ids/new-node-id)
+        token {:provenance/type :lexical-access
+               :lookup/key :binding-test
+               :scope/source :child
+               :scope/chain [:root :child]}
+        answer (scope-source/scope-value
+                :child nil [:root :child] (env/cell-binding bound-id) #{token})
+        n0 (-> (scope-source-protocol-net)
+               (nb/install-cell answer-id)
+               (nb/install-cell bound-id)
+               (nb/install-cell out-id)
+               (nb/seed-cell answer-id answer)
+               (nb/seed-cell bound-id 12))
+        [props n1] ((env/p:access-binding answer-id out-id) n0)
+        n2 (nb/run-propagators n1 props)
+        selected (strongest n2 out-id)]
+    (is (= 12 (scope-source/base-value selected)))
+    (is (= #{token} (scope-source/dependencies selected)))))
 
 (deftest execute-sub-env-reuses-behavior-arithmetic-point-non-continuation
   (let [left (behavior-view [(hist/point-record 6 2)] #{[:a 6]})
