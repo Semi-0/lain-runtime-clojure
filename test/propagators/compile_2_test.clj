@@ -17,6 +17,7 @@
             [propagators.compiler-2.main :as main]
             [propagators.compiler-2.operator-value :as operator-value]
             [propagators.compiler-2.parser :as parser]
+            [propagators.compiler-2.retained-application :as retained-app]
             [propagators.compiler-2.behavior
              :refer [behavior-tms-env]]
             [propagators.core :as core]
@@ -1489,11 +1490,11 @@
                                           compiler-app/apply-application-props-key))))))
 
 (deftest compile-2-application-installs-application-propagator
-  (testing "network closure calls are evaluated by compiler-2 p:apply-application"
+  (testing "network closure calls are evaluated by retained compiler-2 p:apply-application"
     (let [compiled (compile-source "((:: [x] (+ x 1)) 4)")
           apply-props (net/network-dict-entry
                        (:net compiled)
-                       compiler-app/apply-application-props-key)
+                       retained-app/retained-application-props-key)
           [app-id] (main/compiled-applications (:net compiled))
           app-info (strongest (:net compiled) app-id)
           result-net (run-compiled compiled)]
