@@ -570,6 +570,27 @@
     (is (contains? (distributed-slot-keys n (:cell compiled))
                    (tms/premise-slot-key :from-main-entry 0)))))
 
+(deftest compiler-2-static-tms-operator-does-not-watch-its-output
+  (let [compiled (main/compile-source-with-behavior-tms
+                  "(let-cell [epoch out]
+                     (def premise :static/premise)
+                     (premise-retract premise epoch out)
+                     out)")
+        out-id (env/binding-id (env/lookup (:env compiled) 'out))
+        epoch-id (env/binding-id (env/lookup (:env compiled) 'epoch))
+        [prop-id] (filter (fn [id]
+                           (= "premise-retract"
+                              (prop/prop-name
+                               (net/network-env-lookup (:net compiled) id))))
+                         (:props compiled))
+        inputs (:inputs (get (net/net-graph (:net compiled)) prop-id))]
+    (is prop-id)
+    (is (contains? inputs epoch-id))
+    (is (not (contains? inputs out-id)))
+    (is (empty? (net/network-dict-entry
+                 (:net compiled)
+                 retained-app/retained-application-props-key)))))
+
 (deftest compiler-2-main-can-define-behavior-producing-network
   (let [compiled (main/compile-source-with-behavior-tms
                   "(let-cell [a b out]
@@ -3467,9 +3488,10 @@
                                 out)"
                              (:env one-brought)
                              n2)]
-    (is (= value/contradiction (strongest n0 out-id)))
+    (is (value/contradiction? (strongest n0 out-id)))
+    (is (seq (value/contradiction-provenance (strongest n0 out-id))))
     (is (= 15 (distributed-current-value n1 out-id)))
-    (is (= value/contradiction (strongest n2 out-id)))
+    (is (value/contradiction? (strongest n2 out-id)))
     (is (= 6 (distributed-current-value n3 out-id)))
     (is (contains? (distributed-slot-keys n3 out-id)
                    (tms/premise-slot-key :definition/plus-one 2)))
