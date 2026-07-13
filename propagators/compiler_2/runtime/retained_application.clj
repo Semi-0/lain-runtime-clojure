@@ -10,6 +10,7 @@
             [propagators.compiler-2.runtime.closure-frame :as closure-frame]
             [propagators.compiler-2.model.application-value :as application-value]
             [propagators.compiler-2.model.closure-value :as closure-value]
+            [propagators.compiler-2.model.env :as env]
             [propagators.compiler-2.compiler.dispatch :as dispatch]
             [propagators.compiler-2.compiler.basis :as h]
             [propagators.compiler-2.runtime.topology-effects :as topology-effects]
@@ -52,32 +53,39 @@
 
 (defn- addressed-id
   "Select the canonical cell named by a scoped lexical candidate."
-  [network id]
-  (let [candidate (h/strongest-or-nothing network id)
+  [network declared-addresses id]
+  (let [declared-address (get declared-addresses id)
+        candidate (h/strongest-or-nothing network id)
         address (when (scope-source/scope-value? candidate)
                   (scope-source/binding-address candidate))]
-    (if (and (ids/node-id? address)
-             (contains? (net/net-env network) address))
-      address
-      id)))
+    (or (when (and (ids/node-id? declared-address)
+                   (contains? (net/net-env network) declared-address))
+          declared-address)
+        (when (and (ids/node-id? address)
+                   (contains? (net/net-env network) address))
+          address)
+        id)))
 
 (defn- candidate-addresses
   "Return every callable address retained by one lexical operator cell."
-  [network id]
-  (->> (scope-source/content-candidates
-        (net/network-cell-content network id))
-       (keep scope-source/binding-address)
-       (filter ids/node-id?)
-       (filter #(contains? (net/net-env network) %))
-       distinct
-       vec))
+  [network declared-addresses id]
+  (let [declared-address (get declared-addresses id)]
+    (->> (concat
+          (when declared-address [declared-address])
+          (keep scope-source/binding-address
+                (scope-source/content-candidates
+                 (net/network-cell-content network id))))
+         (filter ids/node-id?)
+         (filter #(contains? (net/net-env network) %))
+         distinct
+         vec)))
 
 (defn- operator-ids
-  [network operator-id]
-  (let [addresses (candidate-addresses network operator-id)]
+  [network declared-addresses operator-id]
+  (let [addresses (candidate-addresses network declared-addresses operator-id)]
     (if (seq addresses)
       addresses
-      [(addressed-id network operator-id)])))
+      [(addressed-id network declared-addresses operator-id)])))
 
 (defn- activation-parts
   [result]
@@ -104,7 +112,7 @@
   [compile* application-id operator-id args-id arg-ids context-id out-id network]
   (let [app-info (h/strongest-or-nothing network application-id)
         answer (h/strongest-or-nothing network operator-id)
-        operator answer
+        operator (scope-source/unwrap answer)
         key [application-id operator-id arg-ids out-id]]
     (cond
       (or (value/unusable? app-info)
@@ -114,8 +122,7 @@
       (value/unusable? answer)
       []
 
-      (and (closure-value/closure-info? operator)
-           (not (scope-source/scope-value? answer)))
+      (closure-value/closure-info? operator)
       (if (application-installed? network key)
         []
         (or (declare-closure-frame compile*
@@ -137,9 +144,10 @@
                                                out-id
                                                network))))
 
-(defn application-messages-with
-  [compile* application-id operator-id args-id arg-ids context-id out-id network]
-  (let [arg-ids (mapv (partial addressed-id network) arg-ids)]
+(defn- application-messages-with-addresses
+  [compile* declared-addresses application-id operator-id args-id arg-ids context-id
+   out-id network]
+  (let [arg-ids (mapv (partial addressed-id network declared-addresses) arg-ids)]
     (merge-activation-results
      (mapv #(application-messages-for-operator compile*
                                                application-id
@@ -149,29 +157,46 @@
                                                context-id
                                                out-id
                                                network)
-           (operator-ids network operator-id)))))
+           (operator-ids network declared-addresses operator-id)))))
+
+(defn application-messages-with
+  [compile* application-id operator-id args-id arg-ids context-id out-id network]
+  (application-messages-with-addresses compile* {} application-id operator-id
+                                       args-id arg-ids context-id out-id network))
 
 (defn application-messages
   [application-id operator-id args-id arg-ids context-id out-id network]
-  (application-messages-with dispatch/compile-expression
+  (application-messages-with dispatch/default-compiler
                              application-id operator-id args-id arg-ids
                              context-id out-id network))
+
+(defn- lexical-addresses
+  [network ids]
+  (into {}
+        (keep (fn [id]
+                (when-let [address (env/lexical-value-address network id)]
+                  [id address])))
+        ids))
+
+(defn- application-activation
+  [compile* declared-addresses application-id operator-id args-id arg-ids
+   context-id out-id]
+  (fn [_inputs _outputs network]
+    (application-messages-with-addresses
+     compile* declared-addresses application-id operator-id args-id arg-ids
+     context-id out-id network)))
 
 (defn p:apply-application-with
   [compile* application-id operator-id args-id arg-ids context-id out-id]
   (let [arg-ids (vec arg-ids)
-        activate (fn [_inputs _outputs network]
-                   (application-messages-with compile*
-                                              application-id
-                                              operator-id
-                                              args-id
-                                              arg-ids
-                                              context-id
-                                              out-id
-                                              network))
+        lexical-ids (into [operator-id] arg-ids)
         inputs (into [application-id operator-id args-id context-id] arg-ids)]
     (fn [network]
-      (let [network* (reduce h/ensure-cell network (conj inputs out-id))
+      (let [declared-addresses (lexical-addresses network lexical-ids)
+            activate (application-activation compile* declared-addresses
+                                             application-id operator-id args-id
+                                             arg-ids context-id out-id)
+            network* (reduce h/ensure-cell network (conj inputs out-id))
             [prop-id n] ((prop/construct-propagator :compiler-2/retained-application
                                                     activate inputs [out-id])
                          network*)]
@@ -183,6 +208,6 @@
 
 (defn p:apply-application
   [application-id operator-id args-id arg-ids context-id out-id]
-  (p:apply-application-with dispatch/compile-expression
+  (p:apply-application-with dispatch/default-compiler
                             application-id operator-id args-id arg-ids
                             context-id out-id))

@@ -170,5 +170,5 @@
 
 (defn p:apply-lexical-closure
   [closure-id arg-ids out-id]
-  (p:apply-lexical-closure-with dispatch/compile-expression
+  (p:apply-lexical-closure-with dispatch/default-compiler
                                 closure-id arg-ids out-id))

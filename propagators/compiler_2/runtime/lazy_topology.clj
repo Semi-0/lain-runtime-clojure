@@ -101,11 +101,13 @@
   [compile* state condition-id body]
   (let [[state' result-binding] (h/new-cell state :when-result)
         result-id (env/binding-id result-binding)
+        guard-id (or (env/lexical-value-address (:net state') condition-id)
+                     condition-id)
         prop-id (h/node-id state' :when-prop)
         when-key [:compiler-2 :when (:seed state') (:path state') result-id]
         captured-state state'
         activate (fn [_inputs _outputs network]
-                   (let [condition (h/strongest-or-nothing network condition-id)]
+                   (let [condition (h/strongest-or-nothing network guard-id)]
                      (cond
                        (value/nothing? condition)
                        []
@@ -124,8 +126,9 @@
                         body
                         (fvm/bind-name when-scope when-key result-id)))))
         [installed-id network'] ((prop/construct-propagator prop-id
+                                                            :compiler-2/lazy-when
                                                             activate
-                                                            [condition-id]
+                                                            [guard-id]
                                                             [result-id])
                                  (:net state'))]
     [(-> state'
@@ -135,7 +138,5 @@
 
 (defn install-when-topology
   [state condition-id body]
-  (install-when-topology-with compiler-dispatch/compile-expression
+  (install-when-topology-with compiler-dispatch/default-compiler
                               state condition-id body))
-
-

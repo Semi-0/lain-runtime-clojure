@@ -2,6 +2,7 @@
   "Translate an additively compiled network fragment into bounded effects."
   (:require [propagators.cells.cell :as cell]
             [propagators.cells.value :as value]
+            [propagators.compiler-2.model.env :as env]
             [propagators.gur.flat :as fvm]
             [propagators.message :refer [message]]
             [propagators.network :as net]
@@ -63,8 +64,9 @@
 
 (defn network-diff
   [base compiled prop-ids]
-  {:effects (into (new-cell-effects base compiled)
-                  (prop-effects base compiled prop-ids))
+  {:effects (into (env/lexical-topology-effects compiled)
+                  (concat (new-cell-effects base compiled)
+                          (prop-effects base compiled prop-ids)))
    :messages (changed-cell-messages base compiled)})
 
 (defn declare-once

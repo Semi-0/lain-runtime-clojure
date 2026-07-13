@@ -153,14 +153,15 @@
 (defn declare-closure-environment
   "Declare one live closure frame and all of its addressed locals."
   [network lexical-env-id frame-id inputs output-targets input-ids]
-  (let [[sub-props network'] ((env/p:sub-env lexical-env-id frame-id)
-                              (h/ensure-cell network frame-id))
-        declarations (concat (keep (fn [[sym id]] (when sym [sym id]))
+  (let [declarations (concat (keep (fn [[sym id]] (when sym [sym id]))
                                    output-targets)
-                             (map vector inputs input-ids))]
+                             (map vector inputs input-ids))
+        [sub-props network']
+        ((env/p:scope-frame lexical-env-id frame-id (map first declarations))
+         (h/ensure-cell network frame-id))]
     (reduce
      (fn [[props n] [sym id]]
-       (let [[ids n'] ((env/p:declare-local sym frame-id id) n)]
+       (let [[ids n'] ((env/p:declare-fixed-local sym frame-id id) n)]
          [(into props ids) n']))
      [(vec sub-props) network']
      declarations)))
@@ -188,7 +189,7 @@
   Returns declaration data only; callers choose transient execution or an
   outer-network topology diff."
   ([network closure-info frame-env-id compile-state]
-   (prepare-closure-frame dispatch/compile-expression
+   (prepare-closure-frame dispatch/default-compiler
                           network closure-info frame-env-id compile-state))
   ([compile* network closure-info frame-env-id compile-state]
    (let [[state result]
@@ -393,7 +394,7 @@
 
 (defn closure-application-messages
   [closure-id args-id scheduled-arg-ids out-id network]
-  (closure-application-messages-with dispatch/compile-expression
+  (closure-application-messages-with dispatch/default-compiler
                                      closure-id args-id scheduled-arg-ids
                                      out-id network))
 
@@ -422,7 +423,7 @@
 
 (defn p:apply-closure
   [closure-id args-id arg-ids out-id]
-  (p:apply-closure-with dispatch/compile-expression
+  (p:apply-closure-with dispatch/default-compiler
                         closure-id args-id arg-ids out-id))
 
 (defn- primitive-application-messages
@@ -525,7 +526,7 @@
 
 (defn application-messages
   [application-id operator-id args-id scheduled-arg-ids context-id out-id network]
-  (application-messages-with dispatch/compile-expression
+  (application-messages-with dispatch/default-compiler
                              application-id operator-id args-id scheduled-arg-ids
                              context-id out-id network))
 
@@ -651,7 +652,7 @@
 
 (defn p:apply-application
   [application-id operator-id args-id arg-ids context-id out-id]
-  (p:apply-application-with dispatch/compile-expression
+  (p:apply-application-with dispatch/default-compiler
                             application-id operator-id args-id arg-ids
                             context-id out-id))
 
@@ -663,7 +664,7 @@
                                             child-env-id
                                             :parent)
         [imported _] (env/import-environment network runtime-parent-id parent-env)
-        [props declared] ((env/p:sub-env runtime-parent-id child-env-id)
+        [props declared] ((env/p:scope-frame runtime-parent-id child-env-id)
                           (h/ensure-cell imported child-env-id))]
     [props declared]))
 
@@ -730,7 +731,7 @@
 
 (defn execute-sub-env-messages
   [parent-env-id expr-id child-env-id out-id network]
-  (execute-sub-env-messages-with dispatch/compile-expression
+  (execute-sub-env-messages-with dispatch/default-compiler
                                  parent-env-id expr-id child-env-id out-id
                                  network))
 
@@ -768,5 +769,5 @@
   ([parent-env-id expr-id child-env-id out-id]
    (p:execute-sub-env parent-env-id expr-id [] child-env-id out-id))
   ([parent-env-id expr-id watch-ids child-env-id out-id]
-   (p:execute-sub-env-with dispatch/compile-expression
+   (p:execute-sub-env-with dispatch/default-compiler
                            parent-env-id expr-id watch-ids child-env-id out-id)))
