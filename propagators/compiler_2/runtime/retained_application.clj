@@ -7,6 +7,7 @@
   "
   (:require [propagators.cells.value :as value]
             [propagators.compiler-2.runtime.application :as application]
+            [propagators.compiler-2.runtime.closure-frame :as closure-frame]
             [propagators.compiler-2.model.application-value :as application-value]
             [propagators.compiler-2.model.closure-value :as closure-value]
             [propagators.compiler-2.compiler.dispatch :as dispatch]
@@ -14,6 +15,7 @@
             [propagators.compiler-2.runtime.topology-effects :as topology-effects]
             [propagators.datastructures.scope-source :as scope-source]
             [propagators.gur.flat :as fvm]
+            [propagators.ids :as ids]
             [propagators.network :as net]
             [propagators.propagator :as prop]))
 
@@ -31,32 +33,78 @@
              (application/closure-call-plan closure arg-ids out-id)]
     (let [key [application-id closure-id arg-ids out-id]
           frame-id (h/stable-node-id :compiler-2/retained-application key :env)
-          frame-env (application/closure-body-env
-                     (closure-value/closure-env closure)
-                     (closure-value/closure-inputs closure)
-                     targets
-                     input-ids)
-          prepared-network (h/seed-cell network frame-id frame-env)
-          prepared (application/prepare-closure-frame
-                    compile*
-                    prepared-network
-                    closure
-                    frame-env
-                    {:seed [:compiler-2/retained-application key]
-                     :application/cell-declarer :retained-frame})]
-      (-> (topology-effects/network-diff network
-                                         (:net prepared)
-                                         (:props prepared))
+          [env-props prepared-network]
+          (application/declare-closure-environment
+           network
+           (closure-value/closure-env closure)
+           frame-id
+           (closure-value/closure-inputs closure)
+           targets
+           input-ids)
+          [frame-prop compiled]
+          ((closure-frame/p:apply-closure-with compile* closure-id frame-id)
+           prepared-network)]
+      (-> (topology-effects/network-diff network compiled
+                                         (conj (vec env-props) frame-prop))
           (update :effects
                   #(into [(fvm/bind-name retained-application-scope key frame-id)]
                          %))))))
 
-(defn application-messages-with
+(defn- addressed-id
+  "Select the canonical cell named by a scoped lexical candidate."
+  [network id]
+  (let [candidate (h/strongest-or-nothing network id)
+        address (when (scope-source/scope-value? candidate)
+                  (scope-source/binding-address candidate))]
+    (if (and (ids/node-id? address)
+             (contains? (net/net-env network) address))
+      address
+      id)))
+
+(defn- candidate-addresses
+  "Return every callable address retained by one lexical operator cell."
+  [network id]
+  (->> (scope-source/content-candidates
+        (net/network-cell-content network id))
+       (keep scope-source/binding-address)
+       (filter ids/node-id?)
+       (filter #(contains? (net/net-env network) %))
+       distinct
+       vec))
+
+(defn- operator-ids
+  [network operator-id]
+  (let [addresses (candidate-addresses network operator-id)]
+    (if (seq addresses)
+      addresses
+      [(addressed-id network operator-id)])))
+
+(defn- activation-parts
+  [result]
+  (if (map? result)
+    {:effects (vec (:effects result))
+     :messages (vec (:messages result))}
+    {:effects []
+     :messages (vec (or result []))}))
+
+(defn- merge-activation-results
+  [results]
+  (let [{:keys [effects messages]}
+        (reduce (fn [combined result]
+                  (let [parts (activation-parts result)]
+                    {:effects (into (:effects combined) (:effects parts))
+                     :messages (into (:messages combined) (:messages parts))}))
+                {:effects [] :messages []}
+                results)]
+    (if (seq effects)
+      {:effects effects :messages messages}
+      messages)))
+
+(defn- application-messages-for-operator
   [compile* application-id operator-id args-id arg-ids context-id out-id network]
   (let [app-info (h/strongest-or-nothing network application-id)
         answer (h/strongest-or-nothing network operator-id)
-        operator (scope-source/unwrap answer)
-        arg-ids (vec arg-ids)
+        operator answer
         key [application-id operator-id arg-ids out-id]]
     (cond
       (or (value/unusable? app-info)
@@ -88,6 +136,20 @@
                                                context-id
                                                out-id
                                                network))))
+
+(defn application-messages-with
+  [compile* application-id operator-id args-id arg-ids context-id out-id network]
+  (let [arg-ids (mapv (partial addressed-id network) arg-ids)]
+    (merge-activation-results
+     (mapv #(application-messages-for-operator compile*
+                                               application-id
+                                               %
+                                               args-id
+                                               arg-ids
+                                               context-id
+                                               out-id
+                                               network)
+           (operator-ids network operator-id)))))
 
 (defn application-messages
   [application-id operator-id args-id arg-ids context-id out-id network]
@@ -124,5 +186,3 @@
   (p:apply-application-with dispatch/compile-expression
                             application-id operator-id args-id arg-ids
                             context-id out-id))
-
-

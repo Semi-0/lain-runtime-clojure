@@ -17,11 +17,13 @@
             [propagators.compiler-2.model.env :as env]
             [propagators.compiler-2.compiler.basis :as h]
             [propagators.compiler-2.model.operator-value :as operator-value]
+            [propagators.compiler-2.runtime.topology-effects :as topology-effects]
             [propagators.core :as core]
             [propagators.datastructures.compound-object :as obj]
             [propagators.datastructures.scope-source :as scope-source]
             [propagators.helpers.task-queue :as tq]
             [propagators.ids :as ids]
+            [propagators.layered :as layered]
             [propagators.message :as msg :refer [message]]
             [propagators.network :as net]
             [propagators.propagator :as prop]
@@ -148,7 +150,22 @@
     (vector? output) output
     :else []))
 
-(defn closure-body-env
+(defn declare-closure-environment
+  "Declare one live closure frame and all of its addressed locals."
+  [network lexical-env-id frame-id inputs output-targets input-ids]
+  (let [[sub-props network'] ((env/p:sub-env lexical-env-id frame-id)
+                              (h/ensure-cell network frame-id))
+        declarations (concat (keep (fn [[sym id]] (when sym [sym id]))
+                                   output-targets)
+                             (map vector inputs input-ids))]
+    (reduce
+     (fn [[props n] [sym id]]
+       (let [[ids n'] ((env/p:declare-local sym frame-id id) n)]
+         [(into props ids) n']))
+     [(vec sub-props) network']
+     declarations)))
+
+(defn ^:deprecated closure-body-env
   [lexical-env inputs output-targets input-ids]
   (let [base-env (reduce (fn [scoped-env [sym id]]
                            (if sym
@@ -156,31 +173,30 @@
                              scoped-env))
                          (env/sub-env lexical-env)
                          output-targets)]
-    (reduce
-     (fn [scoped-env [sym id]]
-       (env/bind-local scoped-env sym (env/cell-binding id)))
-     base-env
-     (map vector inputs input-ids))))
+    (reduce (fn [scoped-env [sym id]]
+              (env/bind-local scoped-env sym (env/cell-binding id)))
+            base-env
+            (map vector inputs input-ids))))
 
 (defn- compile-body
-  [compile* body body-env state]
-  (compile* (assoc state :env body-env :compiler compile*) body))
+  [compile* body env-id state]
+  (compile* (assoc state :env env-id :compiler compile*) body))
 
 (defn prepare-closure-frame
   "Compile a closure body against an already-bound frame environment.
 
   Returns declaration data only; callers choose transient execution or an
   outer-network topology diff."
-  ([network closure-info frame-env compile-state]
+  ([network closure-info frame-env-id compile-state]
    (prepare-closure-frame dispatch/compile-expression
-                          network closure-info frame-env compile-state))
-  ([compile* network closure-info frame-env compile-state]
+                          network closure-info frame-env-id compile-state))
+  ([compile* network closure-info frame-env-id compile-state]
    (let [[state result]
          (compile-body compile*
                        (closure-value/closure-body closure-info)
-                       frame-env
+                       frame-env-id
                        (merge {:net network
-                               :env frame-env
+                               :env frame-env-id
                                :seed [:compiler-2/apply-closure
                                       (closure-value/closure-scope closure-info)]
                                :path []
@@ -285,18 +301,25 @@
           (boundary/create-boundary-inputs arg-ids)
           (#(let [inner-inputs (mapv (partial net/lookup-inner-in %) arg-ids)
                   output-inners (mapv (partial net/lookup-inner-out %) output-ids)
-                  activation-env (closure-body-env lexical-env
-                                           inputs
-                                           (mapv (fn [[sym _id] inner-id]
-                                                   [sym inner-id])
-                                                 output-targets
-                                                 output-inners)
-                                           inner-inputs)
+                  frame-id (h/stable-node-id :compiler-2/transient-frame
+                                             lexical-env arg-ids output-ids)
+                  lexical-env-value (h/strongest-or-nothing network lexical-env)
+                  with-lexical-env (h/seed-cell % lexical-env lexical-env-value)
+                  [env-props activation-net]
+                  (declare-closure-environment
+                   with-lexical-env
+                   lexical-env
+                   frame-id
+                   inputs
+                   (mapv (fn [[sym _id] inner-id] [sym inner-id])
+                         output-targets
+                         output-inners)
+                   inner-inputs)
                   prepared (prepare-closure-frame
                             compile*
-                            %
+                            activation-net
                             closure-info
-                            activation-env
+                            frame-id
                             {:seed [:compiler-2/apply-closure
                                     (closure-value/closure-scope closure-info)
                                     arg-ids
@@ -304,7 +327,8 @@
                   result-id (:result-id prepared)
                   body-net (run-activation-network (:net prepared)
                                                    inner-inputs
-                                                   (:props prepared))]
+                                                   (into (vec env-props)
+                                                         (:props prepared)))]
               (if (output-inners-ready? body-net output-inners)
                 body-net
                 (let [[activation-net adapter-props]
@@ -424,24 +448,29 @@
          :dependencies (apply set/union
                               (map scope-source/dependencies scoped))}))))
 
-(defn- scope-message
-  [{:keys [candidate dependencies]} m]
-  (message (msg/message-id m)
-           (scope-source/scope-value
-            (scope-source/source-scope candidate)
-            nil
-            (scope-source/context-chain candidate)
-            (msg/message-value m)
-            dependencies)))
+(defn- scoped-result
+  "Refine an already-scoped result without turning ordinary values into scopes."
+  [{:keys [candidate dependencies]} result]
+  (if (scope-source/scope-value? result)
+    (scope-source/add-dependencies result dependencies)
+    result))
+
+(defn- scope-result-message
+  [scope result-id m]
+  (if (= result-id (msg/message-id m))
+    (message result-id (scoped-result scope (msg/message-value m)))
+    m))
 
 (defn- scope-activation-result
-  [scope result]
+  [scope result-id result]
   (if-not scope
     result
     (cond
       (map? result) (update result :messages
-                            #(mapv (partial scope-message scope) (or % [])))
-      (sequential? result) (mapv (partial scope-message scope) result)
+                            #(mapv (partial scope-result-message scope result-id)
+                                   (or % [])))
+      (sequential? result) (mapv (partial scope-result-message scope result-id)
+                                 result)
       :else result)))
 
 (defn application-messages-with
@@ -464,6 +493,9 @@
       []
 
       (value/unusable? operator)
+      []
+
+      (value/contradiction? operator)
       []
 
       (operator-value/operator-closure? operator)
@@ -489,13 +521,93 @@
                                          scheduled-arg-ids
                                          out-id
                                          network))]
-    (scope-activation-result scope result)))
+    (scope-activation-result scope out-id result)))
 
 (defn application-messages
   [application-id operator-id args-id scheduled-arg-ids context-id out-id network]
   (application-messages-with dispatch/compile-expression
                              application-id operator-id args-id scheduled-arg-ids
                              context-id out-id network))
+
+(defn- application-base-id
+  [application-id role]
+  (h/stable-node-id :compiler-2 :application-base application-id role))
+
+(defn- base-reader-declaration-key
+  [application-id role]
+  [:application-base-reader application-id role])
+
+(defn- base-reader-declared?
+  [network application-id role]
+  ((requiring-resolve
+    'propagators.compiler-2.runtime.topology-effects/declared?)
+   network
+   (base-reader-declaration-key application-id role)))
+
+(defn- declare-base-reader
+  [network application-id role source-id base-id]
+  (let [declaration-key (base-reader-declaration-key application-id role)]
+  ((requiring-resolve
+    'propagators.compiler-2.runtime.topology-effects/declare-once)
+   network
+   declaration-key
+   base-id
+   #(layered/declare-layer-reader %
+                                  declaration-key
+                                  scope-source/base-layer
+                                  source-id
+                                  base-id))))
+
+(defn- source-specs
+  [application-id operator-id arg-ids]
+  (into [{:role :operator
+          :source-id operator-id
+          :base-id (application-base-id application-id :operator)}]
+        (map-indexed
+         (fn [index arg-id]
+           {:role [:arg index]
+            :source-id arg-id
+            :base-id (application-base-id application-id [:arg index])})
+         arg-ids)))
+
+(defn- addressable-source?
+  [network source-id]
+  (layered/layer-addressable? (h/strongest-or-nothing network source-id)
+                              scope-source/base-layer))
+
+(defn- pending-base-readers
+  [network application-id specs]
+  (filterv (fn [{:keys [role source-id]}]
+             (and (addressable-source? network source-id)
+                  (nil? (layered/layer-parent-id network
+                                                 source-id
+                                                 scope-source/base-layer))
+                  (not (base-reader-declared? network application-id role))))
+           specs))
+
+(defn- merge-activation-results
+  [left right]
+  {:effects (into (vec (:effects left)) (:effects right))
+   :messages (into (vec (:messages left)) (:messages right))})
+
+(defn- declare-pending-base-readers
+  [network application-id specs]
+  (reduce (fn [result {:keys [role source-id base-id]}]
+            (merge-activation-results
+             result
+             (declare-base-reader network
+                                  application-id
+                                  role
+                                  source-id
+                                  base-id)))
+          {:effects [] :messages []}
+          specs))
+
+(defn- evaluation-id
+  [network {:keys [source-id base-id]}]
+  (or (layered/layer-parent-id network source-id scope-source/base-layer)
+      (when (addressable-source? network source-id) base-id)
+      source-id))
 
 (defn p:apply-application-with
   "Evaluate one retained compiler-2 application object.
@@ -505,16 +617,27 @@
   and closure values delegate to the closure application path."
   [compile* application-id operator-id args-id arg-ids context-id out-id]
   (let [arg-ids (vec arg-ids)
+        specs (source-specs application-id operator-id arg-ids)
+        possible-base-ids (mapv :base-id specs)
         activate (fn [_inputs _outputs network]
-                   (application-messages-with compile*
-                                              application-id
-                                              operator-id
-                                              args-id
-                                              arg-ids
-                                              context-id
-                                              out-id
-                                              network))
-        inputs (into [application-id operator-id args-id context-id] arg-ids)]
+                   (let [pending (pending-base-readers network
+                                                       application-id
+                                                       specs)]
+                     (if (seq pending)
+                       (declare-pending-base-readers network
+                                                     application-id
+                                                     pending)
+                       (let [evaluation-ids (mapv #(evaluation-id network %) specs)]
+                         (application-messages-with compile*
+                                                    application-id
+                                                    (first evaluation-ids)
+                                                    args-id
+                                                    (subvec evaluation-ids 1)
+                                                    context-id
+                                                    out-id
+                                                    network)))))
+        inputs (into [application-id operator-id args-id context-id]
+                     (concat arg-ids possible-base-ids))]
     (fn [network]
       (let [network* (reduce h/ensure-cell network (conj inputs out-id))
             [prop-id n] ((prop/construct-propagator :compiler-2/apply-application
@@ -532,18 +655,26 @@
                             application-id operator-id args-id arg-ids
                             context-id out-id))
 
-(defn- install-child-env-cell
-  [network parent-env-id child-env-id]
-  (reduce h/ensure-cell network [parent-env-id child-env-id]))
+(defn- declare-child-environment
+  [network parent-env-id parent-env child-env-id]
+  (let [runtime-parent-id (h/stable-node-id :compiler-2
+                                            :execute-sub-env
+                                            parent-env-id
+                                            child-env-id
+                                            :parent)
+        [imported _] (env/import-environment network runtime-parent-id parent-env)
+        [props declared] ((env/p:sub-env runtime-parent-id child-env-id)
+                          (h/ensure-cell imported child-env-id))]
+    [props declared]))
 
 (defn- compile-expr
-  [compile* expr child-env network seed]
+  [compile* expr child-env network seed props]
   (compile*
    {:net network
     :env child-env
     :seed seed
     :path []
-    :props []
+    :props (vec props)
     :applications []
     :compiler compile*}
    expr))
@@ -555,44 +686,47 @@
     (if (or (value/unusable? expr)
             (value/unusable? parent-env))
       []
-      (let [with-child (install-child-env-cell network
-                                               parent-env-id
-                                               child-env-id)
-            child-env (env/extend-env parent-env [:env/child child-env-id])
-            with-child (h/seed-cell with-child child-env-id child-env)]
-        (if (value/unusable? child-env)
-          []
-          (let [[state result] (compile-expr
+      (let [[env-props with-child]
+            (declare-child-environment network
+                                       parent-env-id
+                                       parent-env
+                                       child-env-id)
+            [state result] (compile-expr
                                 compile*
                                 expr
-                                child-env
+                                child-env-id
                                 with-child
                                 [:compiler-2/execute-sub-env
                                  parent-env-id
                                  expr-id
                                  child-env-id
-                                 out-id])
+                                 out-id]
+                                env-props)
                 result-id (env/binding-id result)
                 after-body (run-activation-network (:net state)
                                                    []
                                                    (:props state))
-                result-value (h/strongest-or-nothing after-body result-id)
-                result-content (cell-content-or-nothing after-body result-id)
+                result-answer (h/strongest-or-nothing after-body result-id)
+                addressed-id (when (scope-source/scope-value? result-answer)
+                               (scope-source/binding-address result-answer))
+                value-id (or (when (and (ids/node-id? addressed-id)
+                                         (contains? (net/net-env after-body)
+                                                    addressed-id))
+                                addressed-id)
+                             (layered/layer-parent-id after-body
+                                                      result-id
+                                                      scope-source/base-layer)
+                             result-id)
+                result-value (h/strongest-or-nothing after-body value-id)
+                result-content (cell-content-or-nothing after-body value-id)
                 output-content (if (value/unusable? result-content)
                                  result-value
                                  result-content)]
-            (cond-> []
-              (and (contains? (net/net-env network) child-env-id)
-                   (not (value/unusable? child-env)))
-              (conj (message child-env-id child-env))
-
-              (and result-id
-                   (contains? (net/net-env network) result-id)
-                   (not (value/unusable? result-content)))
-              (conj (message result-id result-content))
-
+            (cond-> (topology-effects/network-diff network
+                                                   after-body
+                                                   (:props state))
               (not (value/unusable? output-content))
-              (conj (message out-id output-content)))))))))
+              (update :messages conj (message out-id output-content)))))))
 
 (defn execute-sub-env-messages
   [parent-env-id expr-id child-env-id out-id network]
@@ -636,5 +770,3 @@
   ([parent-env-id expr-id watch-ids child-env-id out-id]
    (p:execute-sub-env-with dispatch/compile-expression
                            parent-env-id expr-id watch-ids child-env-id out-id)))
-
-

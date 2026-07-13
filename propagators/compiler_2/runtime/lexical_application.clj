@@ -53,23 +53,23 @@
   [compile* network key closure arg-ids out-id]
   (when-let [{:keys [input-ids targets]}
              (application/closure-call-plan closure arg-ids out-id)]
-    (let [frame-id (private-id key :env)
-          frame-env (application/closure-body-env
-                     (closure-value/closure-env closure)
-                     (closure-value/closure-inputs closure)
-                     targets
-                     input-ids)
-          prepared-network (h/seed-cell network frame-id frame-env)
-          prepared (application/prepare-closure-frame
-                    compile*
-                    prepared-network
-                    closure
-                    frame-env
-                    {:seed [:compiler-2/selected-closure key]
-                     :application/cell-declarer :retained-frame})]
-      (-> (topology-effects/network-diff network
-                                         (:net prepared)
-                                         (:props prepared))
+    (let [base-network network
+          private-closure (private-id key :closure)
+          frame-id (private-id key :env)
+          network (h/seed-cell network private-closure closure)
+          [env-props prepared-network]
+          (application/declare-closure-environment
+           network
+           (closure-value/closure-env closure)
+           frame-id
+           (closure-value/closure-inputs closure)
+           targets
+           input-ids)
+          [frame-prop compiled]
+          ((closure-frame/p:apply-closure-with compile* private-closure frame-id)
+           prepared-network)]
+      (-> (topology-effects/network-diff base-network compiled
+                                         (conj (vec env-props) frame-prop))
           (update :effects
                   #(into [(fvm/bind-name raw-scope key frame-id)] %))))))
 
@@ -84,18 +84,20 @@
           private-targets (mapv (fn [[sym _] private-id] [sym private-id])
                                 targets
                                 private-outputs)
-          frame-env (application/closure-body-env
-                     (closure-value/closure-env closure)
-                     (closure-value/closure-inputs closure)
-                     private-targets
-                     input-ids)
           prepared (-> network
                        (h/seed-cell private-closure closure)
-                       (h/seed-cell frame-id frame-env)
                        (#(reduce h/ensure-cell
                                  %
                                  (concat private-outputs
                                          (map second targets)))))
+          [env-props prepared]
+          (application/declare-closure-environment
+           prepared
+           (closure-value/closure-env closure)
+           frame-id
+           (closure-value/closure-inputs closure)
+           private-targets
+           input-ids)
           [frame-prop with-frame]
           ((closure-frame/p:apply-closure-with compile* private-closure frame-id)
            prepared)
@@ -106,7 +108,8 @@
                   [[] with-frame]
                   (map vector private-outputs targets))]
       (-> (topology-effects/network-diff
-           network compiled (into [frame-prop] projection-props))
+           network compiled (into (conj (vec env-props) frame-prop)
+                                  projection-props))
           (update :effects
                   #(into [(fvm/bind-name candidate-scope key frame-id)] %))))))
 
@@ -169,5 +172,3 @@
   [closure-id arg-ids out-id]
   (p:apply-lexical-closure-with dispatch/compile-expression
                                 closure-id arg-ids out-id))
-
-

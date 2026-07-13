@@ -30,6 +30,7 @@
             [propagators.datastructures.scope-source :as scope-source]
             [propagators.datastructures.tms :as tms]
             [propagators.ids :as ids]
+            [propagators.layered :as layered]
             [propagators.message :refer [message]]
             [propagators.network :as net]
             [propagators.network-builder :as nb]
@@ -42,6 +43,14 @@
 (defn- strongest
   [n id]
   (net/network-cell-strongest n id))
+
+(defn- layer-strongest
+  [n object-id layer-name]
+  (let [layer-id (ids/new-node-id)
+        n0 (nb/install-cell n layer-id)
+        [prop-id n1] ((layered/p:layer layer-name layer-id object-id) n0)
+        n2 (nb/run-propagators n1 [prop-id])]
+    (strongest n2 layer-id)))
 
 (defn- prop-count
   [n]
@@ -129,11 +138,12 @@
 
 (defn- behavior-records
   [v]
-  (mapv behavior-record-map (behavior/history-records v)))
+  (mapv behavior-record-map
+        (behavior/history-records (scope-source/unwrap v))))
 
 (defn- behavior-current-value
   [n id]
-  (let [v (strongest n id)]
+  (let [v (scope-source/unwrap (strongest n id))]
     (if (value/unusable? v)
       v
       (behavior/base-value v))))
@@ -1633,8 +1643,10 @@
                                    (def-net inc [x] [out] (+ x 1))
                                    (inc 5 out)
                                    out)")]
-      (is (= 5 (strongest (run-compiled anonymous) (:cell anonymous))))
-      (is (= 6 (strongest (run-compiled named) (:cell named)))))))
+      (is (= 5 (scoped-base
+                (strongest (run-compiled anonymous) (:cell anonymous)))))
+      (is (= 6 (scoped-base
+                (strongest (run-compiled named) (:cell named))))))))
 
 (deftest compile-2-supports-def-and-def-cell
   (testing "def creates named cells, def-cell declares free cells, and def-cell names cell-producing expressions"
@@ -2350,7 +2362,7 @@
       (is (= 23 (strongest result-net (:cell compiled)))))))
 
 (deftest compile-2-supports-bi-sync-operator
-  (testing "<-> installs bidirectional sync and returns the second cell"
+  (testing "<-> is an ordinary application with its own result cell"
     (let [[a-id n1] (seeded-cell net/empty-net 42)
           b-id (ids/new-node-id)
           n2 (nb/install-cell n1 b-id)
@@ -2361,9 +2373,13 @@
           [app-id] (main/compiled-applications (:net compiled))
           app-info (strongest (:net compiled) app-id)
           result-net (run-compiled compiled)]
-      (is (= b-id (:cell compiled)))
-      (is (= b-id (obj/slot-value app-info main/application-output-slot)))
-      (is (= 42 (strongest result-net b-id))))))
+      (is (= (:cell compiled)
+             (obj/slot-value app-info main/application-output-slot)))
+      (is (not= b-id (:cell compiled)))
+      (is (= 42 (strongest result-net b-id)))
+      (is (= 42 (layer-strongest result-net
+                                 (:cell compiled)
+                                 scope-source/base-layer))))))
 
 (deftest compile-2-supports-forward-sync-operator
   (testing "-> installs one-way sync and returns the output cell"
@@ -2371,7 +2387,9 @@
                                       (-> 42 out)
                                       out)")
           result-net (run-compiled compiled)]
-      (is (= 42 (strongest result-net (:cell compiled)))))))
+      (is (= 42 (layer-strongest result-net
+                                 (:cell compiled)
+                                 scope-source/base-layer))))))
 
 (deftest compile-2-supports-forward-sync-chain
   (testing "-> installs a one-way chain and returns the last cell"
@@ -2379,7 +2397,9 @@
                                       (-> 42 a b c)
                                       c)")
           result-net (run-compiled compiled)]
-      (is (= 42 (strongest result-net (:cell compiled)))))))
+      (is (= 42 (layer-strongest result-net
+                                 (:cell compiled)
+                                 scope-source/base-layer))))))
 
 (deftest compile-2-supports-bi-sync-chain
   (testing "<-> installs adjacent bidirectional links and returns the last cell"
@@ -2388,7 +2408,9 @@
                                       (<-> c 42)
                                       a)")
           result-net (run-compiled compiled)]
-      (is (= 42 (strongest result-net (:cell compiled)))))))
+      (is (= 42 (layer-strongest result-net
+                                 (:cell compiled)
+                                 scope-source/base-layer))))))
 
 (deftest compile-2-supports-switch-operator
   (testing "default env includes switch"
@@ -3466,7 +3488,7 @@
                     (default-env)
                     (tms-distributed-protocol-net))
         env0 (:env setup)
-        out-id (env/binding-id (env/lookup env0 'out))
+        out-id (env/resolve-binding-id n0 env0 'out)
         [one-retracted n1] (compile-step
                           "(let-cell []
                              (def one-retract 1)
@@ -3648,6 +3670,54 @@
         selected (strongest n2 out-id)]
     (is (= 12 (scope-source/base-value selected)))
     (is (= #{token} (scope-source/dependencies selected)))))
+
+(deftest compiler-lexical-value-fast-path-keeps-live-scope-dependency
+  (let [compiled (compile-source "(let-cell [x] x)")
+        frame (get-in (net/network-dict-entry (:net compiled)
+                                              env/lexical-topology-key)
+                      [:frames (:env compiled)])
+        bound-id (first (get-in frame [:bindings 'x]))
+        prop-names (->> (vals (net/net-env (:net compiled)))
+                        (filter prop/prop?)
+                        (map prop/prop-name)
+                        set)
+        waiting (run-compiled compiled)
+        with-value (nb/seed-cell waiting bound-id 12)
+        settled (nb/run-propagators
+                 with-value
+                 (nb/neighbor-propagator-ids with-value bound-id))
+        selected (strongest settled (:cell compiled))
+        dependency (first (scope-source/dependencies selected))]
+    (is (ids/node-id? (:scope/source-id frame)))
+    (is (ids/node-id? (:scope/chain-id frame)))
+    (is (ids/node-id? bound-id))
+    (is (not (contains? prop-names :lexical-access/binding-candidates)))
+    (is (not (contains? prop-names :lexical-access/access-binding)))
+    (is (scope-source/scope-value?
+         (strongest waiting (:cell compiled))))
+    (is (= value/nothing
+           (scope-source/base-value (strongest waiting (:cell compiled)))))
+    (is (scope-source/scope-value? selected))
+    (is (= 12 (scope-source/base-value selected)))
+    (is (= :lexical-access (:provenance/type dependency)))
+    (is (= (:scope/source dependency)
+           (peek (:scope/chain dependency))))))
+
+(deftest compiler-lexical-value-fallback-has-the-same-result-shape
+  (let [bound-id (ids/new-node-id)
+        base-net (nb/seed-cell (nb/install-cell net/empty-net bound-id)
+                               bound-id
+                               12)
+        lexical-env (env/bind (default-env)
+                              'x
+                              (env/cell-binding bound-id)
+                              0)
+        compiled (compile-source "x" lexical-env {:net base-net})
+        selected (strongest (run-compiled compiled) (:cell compiled))
+        dependency (first (scope-source/dependencies selected))]
+    (is (scope-source/scope-value? selected))
+    (is (= 12 (scope-source/base-value selected)))
+    (is (= :lexical-access (:provenance/type dependency)))))
 
 (deftest execute-sub-env-reuses-behavior-arithmetic-point-non-continuation
   (let [left (behavior-view [(hist/point-record 6 2)] #{[:a 6]})

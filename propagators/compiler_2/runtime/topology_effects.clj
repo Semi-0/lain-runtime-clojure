@@ -7,6 +7,15 @@
             [propagators.network :as net]
             [propagators.propagator :as prop]))
 
+(def declaration-scope :compiler-2/runtime-declarations)
+
+(defn declared?
+  "True when one delayed topology declaration has already been committed."
+  [network declaration-key]
+  (boolean
+   (get-in (net/network-dict-entry network fvm/name-bindings-key)
+           [declaration-scope declaration-key])))
+
 (defn- cell-entry? [[_ entry]] (cell/cell? entry))
 (defn- prop-entry? [[_ entry]] (prop/prop? entry))
 
@@ -35,6 +44,7 @@
 (defn- declare-prop-effect [compiled prop-id entry]
   (if-let [node (get (net/net-graph compiled) prop-id)]
     (fvm/declare-prop prop-id
+                      (prop/prop-name entry)
                       (vec (:inputs node))
                       (vec (:outputs node))
                       (prop/prop-f entry))
@@ -57,4 +67,16 @@
                   (prop-effects base compiled prop-ids))
    :messages (changed-cell-messages base compiled)})
 
+(defn declare-once
+  "Return bounded effects for one delayed topology declaration.
 
+  `build` receives the current network and returns a compiled network fragment
+  plus the propagator ids that belong to the declaration. The marker is
+  committed by the same runtime that commits the topology effects."
+  [network declaration-key marker-id build]
+  (if (declared? network declaration-key)
+    {:effects [] :messages []}
+    (let [{compiled :net prop-ids :props} (build network)]
+      (update (network-diff network compiled prop-ids)
+              :effects conj
+              (fvm/bind-name declaration-scope declaration-key marker-id)))))

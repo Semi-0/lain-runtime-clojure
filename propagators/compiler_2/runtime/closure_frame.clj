@@ -20,13 +20,13 @@
    (get-in (net/network-dict-entry network fvm/name-bindings-key)
            [frame-scope key])))
 
-(defn- compile-frame [compile* network closure-id env-id closure frame-env]
+(defn- compile-frame [compile* network closure-id env-id closure]
   (let [key (frame-key closure-id env-id)
         prepared (application/prepare-closure-frame
                   compile*
                   network
                   closure
-                  frame-env
+                  env-id
                   {:seed [:compiler-2/closure-frame key]
                    :application/cell-declarer :retained-frame})
         diff (topology-effects/network-diff network
@@ -41,23 +41,19 @@
   (let [key (frame-key closure-id env-id)
         activate
         (fn [_ _ network]
-          (let [closure (h/strongest-or-nothing network closure-id)
-                frame-env (h/strongest-or-nothing network env-id)]
+          (let [closure (h/strongest-or-nothing network closure-id)]
             (cond
-              (or (value/unusable? closure)
-                  (value/unusable? frame-env)) []
+              (value/unusable? closure) []
               (not (closure-value/closure-info? closure)) []
               (frame-installed? network key) []
-              :else (compile-frame compile* network closure-id env-id
-                                   closure frame-env))))]
+              :else (compile-frame compile* network closure-id env-id closure))))]
     (prop/construct-propagator
      (h/stable-node-id :compiler-2/closure-frame key :prop)
      activate
-     [closure-id env-id]
+     [closure-id]
      [])))
 
 (defn p:apply-closure
   [closure-id env-id]
   (p:apply-closure-with dispatch/compile-expression closure-id env-id))
-
 
