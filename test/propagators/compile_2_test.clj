@@ -5,20 +5,20 @@
             [propagators.cells.value :as value]
             [propagators.closure :as closure]
             [propagators.compile :as compile]
-            [propagators.compiler-2.application :as compiler-app]
-            [propagators.compiler-2.application-value :as application-value]
-            [propagators.compiler-2.ast :as ast]
-            [propagators.compiler-2.closure-value :as closure-value]
-            [propagators.compiler-2.env :as env]
-            [propagators.compiler-2.helpers :as h
+            [propagators.compiler-2.runtime.application :as compiler-app]
+            [propagators.compiler-2.model.application-value :as application-value]
+            [propagators.compiler-2.language.ast :as ast]
+            [propagators.compiler-2.model.closure-value :as closure-value]
+            [propagators.compiler-2.model.env :as env]
+            [propagators.compiler-2.compiler.basis :as h
              :refer [behavior-env
                      default-env
                      dependency-env]]
             [propagators.compiler-2.main :as main]
-            [propagators.compiler-2.operator-value :as operator-value]
-            [propagators.compiler-2.parser :as parser]
-            [propagators.compiler-2.retained-application :as retained-app]
-            [propagators.compiler-2.behavior
+            [propagators.compiler-2.model.operator-value :as operator-value]
+            [propagators.compiler-2.language.parser :as parser]
+            [propagators.compiler-2.runtime.retained-application :as retained-app]
+            [propagators.compiler-2.operators.behavior
              :refer [behavior-tms-env]]
             [propagators.core :as core]
             [propagators.datastructures.behavior :as behavior]
@@ -1802,7 +1802,7 @@
 
 (deftest compile-2-application-output-adapter-is-not-materializing
   (testing "closure application projects result cells without a materialization helper"
-    (let [source (slurp "propagators/compiler_2/application.clj")
+    (let [source (slurp "propagators/compiler_2/runtime/application.clj")
           direct (compile-source "((:: [x] (+ x 1)) 4)")
           late (compile-source "(let-cell [some-net out]
                                  (some-net 4 out)
