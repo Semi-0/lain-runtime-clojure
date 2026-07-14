@@ -161,7 +161,7 @@
          (h/ensure-cell network frame-id))]
     (reduce
      (fn [[props n] [sym id]]
-       (let [[ids n'] ((env/p:declare-fixed-local sym frame-id id) n)]
+       (let [[ids n'] ((env/p:declare-canonical-local sym frame-id id) n)]
          [(into props ids) n']))
      [(vec sub-props) network']
      declarations)))

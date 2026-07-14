@@ -8,7 +8,6 @@
             [propagators.compiler-2.compiler.basis :as h]
             [propagators.compiler-2.runtime.topology-effects :as topology-effects]
             [propagators.datastructures.compound-object :as obj]
-            [propagators.datastructures.scope-source :as scope-source]
             [propagators.gur.flat :as fvm]
             [propagators.ids :as ids]
             [propagators.network :as net]
@@ -47,7 +46,7 @@
     (reduce
      (fn [[n props] [sym binding-id]]
        (let [[new-props declared]
-             ((env/p:declare-fixed-local sym frame-id binding-id) n)]
+             ((env/p:declare-canonical-local sym frame-id binding-id) n)]
          [declared (into props new-props)]))
      [framed (vec frame-props)]
      declarations)))
@@ -68,7 +67,9 @@
           [imported imported-id []])))
     [network env-id []]))
 
-(defn- compile-frame [compile* network closure-id env-id closure]
+(defn prepare-frame-topology
+  "Compile one known raw closure against its addressed frame environment."
+  [compile* network closure-id env-id closure]
   (let [key (frame-key closure-id env-id)
         [prepared-network frame-env-id frame-props]
         (prepare-frame-environment network key env-id)
@@ -79,12 +80,18 @@
                   frame-env-id
                   {:seed [:compiler-2/closure-frame key]
                    :application/cell-declarer :retained-frame})
-        diff (topology-effects/network-diff network
-                                            (:net prepared)
-                                            (into frame-props
-                                                  (:props prepared)))]
-    (update diff :effects
-            #(into [(fvm/bind-name frame-scope key env-id)] %))))
+        props (into frame-props (:props prepared))]
+    {:key key
+     :marker (fvm/bind-name frame-scope key env-id)
+     :net (:net prepared)
+     :props props}))
+
+(defn declare-frame-topology
+  [compile* network closure-id env-id closure]
+  (let [{:keys [marker net props]}
+        (prepare-frame-topology compile* network closure-id env-id closure)]
+    (update (topology-effects/network-diff network net props)
+            :effects #(into [marker] %))))
 
 (defn p:apply-closure-with
   "Declare a closure body into the outer network using a pre-bound frame env."
@@ -93,12 +100,13 @@
         activate
         (fn [_ _ network]
           (let [closure-answer (h/strongest-or-nothing network closure-id)
-                closure (scope-source/unwrap closure-answer)]
+                closure closure-answer]
             (cond
               (value/unusable? closure-answer) []
               (not (closure-value/closure-info? closure)) []
               (frame-installed? network key) []
-              :else (compile-frame compile* network closure-id env-id closure))))]
+              :else (declare-frame-topology compile* network closure-id env-id
+                                             closure))))]
     (prop/construct-propagator
      (h/stable-node-id :compiler-2/closure-frame key :prop)
      :compiler-2/closure-frame

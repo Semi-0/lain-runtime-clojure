@@ -101,13 +101,11 @@
   [compile* state condition-id body]
   (let [[state' result-binding] (h/new-cell state :when-result)
         result-id (env/binding-id result-binding)
-        guard-id (or (env/lexical-value-address (:net state') condition-id)
-                     condition-id)
         prop-id (h/node-id state' :when-prop)
         when-key [:compiler-2 :when (:seed state') (:path state') result-id]
         captured-state state'
         activate (fn [_inputs _outputs network]
-                   (let [condition (h/strongest-or-nothing network guard-id)]
+                   (let [condition (h/strongest-or-nothing network condition-id)]
                      (cond
                        (value/nothing? condition)
                        []
@@ -128,7 +126,7 @@
         [installed-id network'] ((prop/construct-propagator prop-id
                                                             :compiler-2/lazy-when
                                                             activate
-                                                            [guard-id]
+                                                            [condition-id]
                                                             [result-id])
                                  (:net state'))]
     [(-> state'
