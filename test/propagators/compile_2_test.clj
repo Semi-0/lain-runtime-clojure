@@ -242,7 +242,31 @@
 
 (defn- compiled-binding-id
   [compiled sym]
-  (env/resolve-binding-id (:net compiled) (:env compiled) sym))
+  (let [n (:net compiled)
+        topology (net/network-dict-entry n env/lexical-topology-key)
+        result-frame (some (fn [[frame-id frame]]
+                             (when (some #{(:cell compiled)}
+                                         (mapcat identity
+                                                 (vals (:bindings frame))))
+                               frame-id))
+                           (:frames topology))
+        topology-ids (distinct
+                      (mapcat #(get-in % [:bindings sym])
+                              (vals (:frames topology))))]
+    (or (env/resolve-binding-id n (:env compiled) sym)
+        (when result-frame
+          (env/resolve-binding-id n result-frame sym))
+        (when (= 1 (count topology-ids))
+          (first topology-ids)))))
+
+(defn- compiled-result-env
+  [compiled]
+  (some (fn [[frame-id frame]]
+          (when (some #{(:cell compiled)}
+                      (mapcat identity (vals (:bindings frame))))
+            frame-id))
+        (:frames (net/network-dict-entry (:net compiled)
+                                         env/lexical-topology-key))))
 
 (defn- reducer-test-node
   [& parts]
@@ -1595,14 +1619,18 @@
 
 (deftest compile-2-def-consumes-let-cell-reservation
   (let [compiled (compile-source "(let-cell [x] (def x 12) x)")
-        binding-ids (get-in (net/network-dict-entry (:net compiled)
-                                                    env/lexical-topology-key)
-                            [:frames (:env compiled) :bindings 'x])
+        topology (net/network-dict-entry (:net compiled)
+                                         env/lexical-topology-key)
+        [frame-id frame] (first (filter (fn [[_ frame]]
+                                         (some #{(:cell compiled)}
+                                               (get-in frame [:bindings 'x])))
+                                       (:frames topology)))
+        binding-ids (get-in frame [:bindings 'x])
         binding-id (first binding-ids)
         result-net (run-compiled compiled)]
     (is (= 1 (count binding-ids)))
     (is (= binding-id (:cell compiled)))
-    (is (nil? (env/reserved-binding-id (:net compiled) (:env compiled) 'x)))
+    (is (nil? (env/reserved-binding-id (:net compiled) frame-id 'x)))
     (is (= 12 (strongest result-net binding-id)))))
 
 (deftest compile-2-named-closures-capture-copied-live-env
@@ -2898,7 +2926,7 @@
                        tms)"
                     base-env
                     net/empty-net)
-        env0 (:env setup)
+        env0 (compiled-result-env setup)
         tms-id (env/resolve-binding-id n0 env0 'tms)
         view0 (reducer/reduced-result (strongest n0 tms-id))
         [one-retracted n1] (compile-step
@@ -2983,7 +3011,7 @@
                        tms)"
                     base-env
                     net/empty-net)
-        env0 (:env setup)
+        env0 (compiled-result-env setup)
         tms-id (env/resolve-binding-id n0 env0 'tms)
         view0 (reducer/reduced-result (strongest n0 tms-id))
         [one-retracted n1] (compile-step
@@ -3263,7 +3291,7 @@
                        tms)"
                     base-env
                     net/empty-net)
-        env0 (:env setup)
+        env0 (compiled-result-env setup)
         id-of (fn [sym] (env/resolve-binding-id n0 env0 sym))
         tms-id (id-of 'tms)
         f-left-id (id-of 'f-left)
@@ -3378,7 +3406,7 @@
                        f)"
                     (default-env)
                     (tms-distributed-protocol-net))
-        env0 (:env setup)
+        env0 (compiled-result-env setup)
         id-of (fn [sym] (env/resolve-binding-id n0 env0 sym))
         a-id (id-of 'a)
         d-id (id-of 'd)
@@ -3461,7 +3489,7 @@
                        f)"
                     (default-env)
                     (tms-distributed-protocol-net))
-        env0 (:env setup)
+        env0 (compiled-result-env setup)
         f-id (env/resolve-binding-id n0 env0 'f)
         [a-retracted n1] (compile-step
                           "(let-cell []
@@ -3516,7 +3544,7 @@
                        out)"
                     (default-env)
                     (tms-distributed-protocol-net))
-        env0 (:env setup)
+        env0 (compiled-result-env setup)
         out-id (env/resolve-binding-id n0 env0 'out)
         [one-retracted n1] (compile-step
                           "(let-cell []
@@ -3574,7 +3602,7 @@
                        out)"
                     (default-env)
                     (tms-distributed-protocol-net))
-        env0 (:env setup)
+        env0 (compiled-result-env setup)
         out-id (env/resolve-binding-id n0 env0 'out)
         [definition-retracted n1] (compile-step
                                    "(let-cell []
@@ -3635,7 +3663,7 @@
                        out)"
                     env
                     n2)
-        env0 (:env setup)
+        env0 (compiled-result-env setup)
         out-id (env/binding-id (env/lookup env0 'out))
         [left-retracted n3] (compile-step
                              "(let-cell []
@@ -3704,9 +3732,12 @@
 
 (deftest compiler-symbol-fast-path-exposes-the-canonical-cell
   (let [compiled (compile-source "(let-cell [x] x)")
-        frame (get-in (net/network-dict-entry (:net compiled)
-                                              env/lexical-topology-key)
-                      [:frames (:env compiled)])
+        topology (net/network-dict-entry (:net compiled)
+                                         env/lexical-topology-key)
+        [frame-id frame] (first (filter (fn [[_ frame]]
+                                         (some #{(:cell compiled)}
+                                               (get-in frame [:bindings 'x])))
+                                       (:frames topology)))
         bound-id (first (get-in frame [:bindings 'x]))
         prop-names (->> (vals (net/net-env (:net compiled)))
                         (filter prop/prop?)
@@ -3722,7 +3753,7 @@
     (is (ids/node-id? bound-id))
     (is (= bound-id (:cell compiled)))
     (is (= bound-id
-           (env/reserved-binding-id (:net compiled) (:env compiled) 'x)))
+           (env/reserved-binding-id (:net compiled) frame-id 'x)))
     (is (not (contains? prop-names :lexical-access/binding-candidates)))
     (is (not (contains? prop-names :lexical-access/binding-value)))
     (is (not (contains? prop-names :lexical-access/access-binding)))

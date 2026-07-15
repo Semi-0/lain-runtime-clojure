@@ -49,17 +49,13 @@
            (closure-value/closure-inputs closure)
            targets
            input-ids)
-          {frame-marker :marker compiled :net frame-props :props}
-          (closure-frame/prepare-frame-topology compile*
-                                                prepared-network
-                                                closure-id
-                                                frame-id
-                                                closure)]
+          [frame-prop compiled]
+          ((closure-frame/p:apply-closure-with compile* closure-id frame-id)
+           prepared-network)]
       (-> (topology-effects/network-diff network compiled
-                                         (into (vec env-props) frame-props))
+                                         (conj (vec env-props) frame-prop))
           (update :effects
-                  #(into [(fvm/bind-name retained-application-scope key frame-id)
-                          frame-marker]
+                  #(into [(fvm/bind-name retained-application-scope key frame-id)]
                          %))))))
 
 (defn- application-messages-for-operator
