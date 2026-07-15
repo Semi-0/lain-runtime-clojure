@@ -79,6 +79,7 @@
                   closure
                   frame-env-id
                   {:seed [:compiler-2/closure-frame key]
+                   :application/caller closure-id
                    :application/cell-declarer :retained-frame})
         props (into frame-props (:props prepared))]
     {:key key
