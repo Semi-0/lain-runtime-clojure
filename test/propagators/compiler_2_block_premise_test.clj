@@ -1,7 +1,7 @@
 (ns propagators.compiler-2-block-premise-test
   (:require [clojure.test :refer [deftest is]]
-            [graph.compiler-2-runtime.block-compiler :as block-compiler]
-            [graph.compiler-2-runtime.state :as runtime-state]
+            [propagators.compiler-2.runtime.tui.block-compiler :as block-compiler]
+            [propagators.compiler-2.runtime.session.state :as runtime-state]
             [propagators.cells.value :as value]
             [propagators.compiler-2.compiler.basis :as h]
             [propagators.compiler-2.language.ast :as ast]

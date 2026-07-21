@@ -177,7 +177,7 @@ The server command path is:
 
 ```text
 server/request
--> graph.compiler-2-runtime.commands/handle-command!
+-> propagators.compiler-2.runtime.session.commands/handle-command!
 -> tui-session/append-tui-block!
 -> input/install-block-incremental!
 -> program-rebuild/incremental-block-state
