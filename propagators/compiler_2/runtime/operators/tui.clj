@@ -5,6 +5,8 @@
             [propagators.compiler-2.runtime.operators.tui.translate :as translate]))
 
 (def block-target-operator targets/block-target-operator)
+(def p:block targets/p:block)
+(def block-cell-operator targets/block-cell-operator)
 (def trace-target-operator targets/trace-target-operator)
 (def instance-operator targets/instance-operator)
 (def block-at-operator effects/block-at-operator)

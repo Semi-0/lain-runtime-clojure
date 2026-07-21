@@ -1,14 +1,18 @@
 (ns propagators.compiler-2.runtime.operators.tui.targets
   "TUI target and instance compiler-2 operators."
-  (:require [propagators.compiler-2.runtime.operators.tui.common :as common]
+  (:require [propagators.compiler-2.compiler.basis :as basis]
+            [propagators.compiler-2.runtime.ids :as runtime-ids]
+            [propagators.compiler-2.runtime.operators.tui.common :as common]
             [propagators.cells.value :as value]
             [propagators.compiler-2.model.operator-value :as operator-value]
             [propagators.datastructures.compound-object :as obj]
             [propagators.message :refer [message]]
-            [propagators.network :as net]))
+            [propagators.network :as net]
+            [propagators.propagator :as prop]))
 
 (def effect-slot-key common/effect-slot-key)
 (def block-at-text-id common/block-at-text-id)
+(def block-at-display-id common/block-at-display-id)
 (def tui-write-effect-request common/tui-write-effect-request)
 (def trace-target-value common/trace-target-value)
 (def effect-tick common/effect-tick)
@@ -59,6 +63,40 @@
                                          instance-id
                                          index-id
                                          target-id)))}))
+
+(defn p:block
+  "Declare a persistent proxy from `out-id` to one TUI block display cell."
+  [instance-id index-id out-id]
+  (fn [network]
+    (let [display-id (block-at-display-id network instance-id index-id)]
+      (when-not display-id
+        (throw (ex-info "block index does not resolve to a display cell"
+                        {:instance-id instance-id
+                         :index-id index-id
+                         :out-id out-id})))
+      ((prop/construct-propagator
+        (runtime-ids/stable-node-id :tui :block instance-id index-id out-id)
+        :runtime/tui-block
+        (fn [_inputs _outputs current]
+          (basis/mono-sync-messages current out-id display-id))
+        [index-id out-id]
+        [display-id])
+       network))))
+
+(defn block-cell-operator
+  "Compile `(block n)` as syntax sugar for `(p:block session n out)`."
+  [instance-id]
+  (operator-value/operator-closure
+   {:name 'block
+    :static-installer
+    (fn [network arg-ids fallback-id]
+      (when-not (= 1 (count arg-ids))
+        (throw (ex-info "block expects one index"
+                        {:arg-ids arg-ids})))
+      (let [index-id (first arg-ids)
+            [prop-id installed] ((p:block instance-id index-id fallback-id)
+                                 network)]
+        [installed [prop-id] fallback-id]))}))
 
 (defn trace-target-operator []
   (operator-value/operator-closure

@@ -2,6 +2,7 @@
   "Shared TUI operator target lookup and effect request helpers."
   (:require [propagators.compiler-2.runtime.boundary :as boundary]
             [propagators.compiler-2.runtime.ids :as runtime-ids]
+            [propagators.cells.value :as value]
             [propagators.datastructures.compound-object :as obj]
             [propagators.datastructures.tms.distributed :as tms]
             [propagators.compiler-2.operators.block-premise :as premise]
@@ -75,6 +76,51 @@
   [effect-id display-id payload tick]
   (boundary/tui-display-effect-request effect-id display-id payload tick))
 
+(defn scope-distributed-claims
+  "Give claims copied into a shared boundary cell a source-local identity.
+
+  Retained applications may reuse an internal claim ID in distinct result
+  cells.  Those claims are valid in isolation, but must not collide when their
+  histories meet in one TUI display cell."
+  [scope source-content contexts]
+  (let [context-supports
+        (mapv (fn [{:premise/keys [id state-cell]}]
+                (tms/support id
+                             [:compiler-2/block-premise state-cell]
+                             :block-premise))
+              contexts)]
+    (tms/distributed-content
+     (reduce-kv
+      (fn [slots slot fact]
+        (if (tms/claim? fact)
+          (let [claim-id [scope (tms/claim-id fact)]]
+            (assoc slots
+                   (tms/claim-slot-key claim-id)
+                   (tms/claim claim-id
+                              (tms/proposition fact)
+                              (tms/claim-value fact)
+                              (into (tms/support-objects fact)
+                                    context-supports))))
+          (assoc slots slot fact)))
+      {}
+      (tms/distributed-slots source-content)))))
+
+(defn forward-distributed-display-update
+  "Forward distributed claims together with the latest premise-state facts.
+
+  A source cell can retain the claim produced by an old block version while
+  that version's current active/retracted state lives in a separate context
+  cell.  Forwarding only the source would leave the display's copied premise
+  state stale."
+  [claim-scope source-content state-contents contexts]
+  (let [forwarded (scope-distributed-claims claim-scope source-content contexts)
+        state-update (tms/distributed-state-update
+                      (into [source-content] state-contents))]
+    (cond
+      (value/contradiction? state-update) state-update
+      state-update (tms/merge-distributed-content forwarded state-update)
+      :else forwarded)))
+
 (defn supported-display-result
   "Connect a premise-supported source directly to a TUI block display cell.
 
@@ -90,14 +136,20 @@
             activate
             (fn [_inputs _outputs current]
               (let [source-content (net/network-cell-content current source-id)
+                    state-contents
+                    (mapv #(net/network-cell-content current %) state-ids)
                     update
                     (if (tms/distributed-value? source-content)
-                      (tms/distributed-forward-update source-content)
+                      (forward-distributed-display-update
+                       [:tui/block-display display-id source-id]
+                       source-content
+                       state-contents
+                       contexts)
                       (premise/support-update
                        [:tui/block-display display-id source-id]
                        (net/network-cell-strongest current source-id)
                        source-content
-                       (mapv #(net/network-cell-content current %) state-ids)
+                       state-contents
                        contexts))]
                 (if update [(message display-id update)] [])))]
         {:effects [(fvm/declare-prop prop-id

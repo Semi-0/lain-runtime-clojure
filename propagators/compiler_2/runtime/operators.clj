@@ -8,6 +8,8 @@
             [propagators.compiler-2.runtime.operators.xr :as xr]))
 
 (def block-target-operator tui/block-target-operator)
+(def p:block tui/p:block)
+(def block-cell-operator tui/block-cell-operator)
 (def block-at-operator tui/block-at-operator)
 (def be-block-at-operator tui/be-block-at-operator)
 (def be-block-target-operator tui/be-block-target-operator)

@@ -292,13 +292,17 @@
 
 (defn- dynamic-runtime-bindings
   [runtime-state current-client-id]
-  (let [instance-id (get-in runtime-state [:tuis current-client-id :instance-id])]
+  (let [instance-id (get-in runtime-state [:tuis current-client-id :instance-id])
+        versioned? (= :versioned-premise
+                      (get-in runtime-state [:tuis current-client-id :mode]))]
     (cond-> (mapv (fn [[client-id {:keys [instance-id]}]]
                     [(symbol client-id) (cenv/cell-binding instance-id)])
                   (:tuis runtime-state))
       instance-id
-      (into [['block (runtime-ops/block-target-operator (boundary-outbox-id)
-                                                        instance-id)]
+      (into [['block (if versioned?
+                       (runtime-ops/block-cell-operator instance-id)
+                       (runtime-ops/block-target-operator (boundary-outbox-id)
+                                                          instance-id))]
              ['be:block (runtime-ops/be-block-target-operator
                          (boundary-outbox-id) instance-id)]
              ['load-blocks

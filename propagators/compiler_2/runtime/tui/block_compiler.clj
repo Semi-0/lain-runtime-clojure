@@ -18,6 +18,7 @@
             [propagators.network-builder :as nb]))
 
 (def dependency-term-name :compiler-2/block-application-dependence)
+(def supported-input-term-name :compiler-2/block-supported-input)
 (def definition-term-name :compiler-2/block-versioned-definition)
 
 (defn settle-current-props
@@ -91,6 +92,37 @@
    {:name dependency-term-name
     :direct-compiler (partial compile-dependency-term context)}))
 
+(defn- declare-supported-input
+  [state binding context]
+  (let [binding-id (env/binding-id binding)
+        contexts (into #{context} (premise/binding-contexts (:net state)
+                                                            binding-id))
+        claim-id [:block-supported-input (:seed state) (:path state)]
+        out-id (premise/application-dependence-cell-id claim-id)
+        network (nb/ensure-cell (:net state) out-id)
+        [prop-id installed]
+        ((premise/p:block-premise claim-id binding-id contexts out-id) network)]
+    [(-> state
+         (assoc :net (premise/record-binding-contexts installed out-id contexts))
+         (update :props conj prop-id))
+     (env/cell-binding out-id)]))
+
+(defn- compile-supported-input
+  [context compile-k state operand-forms _unused-out-id k]
+  (when-not (= 1 (count operand-forms))
+    (throw (ex-info "block supported input expects one expression"
+                    {:operands operand-forms})))
+  (cps/call
+   compile-k state (first operand-forms)
+   (fn [state binding]
+     (let [[state' supported] (declare-supported-input state binding context)]
+       (cps/continue k state' supported)))))
+
+(defn supported-input-term-operator [context]
+  (operator-value/operator-closure
+   {:name supported-input-term-name
+    :direct-compiler (partial compile-supported-input context)}))
+
 (defn- compile-definition-term
   [name signature explicit compile-k state operand-forms _out-id k]
   (when-not (= 1 (count operand-forms))
@@ -124,15 +156,41 @@
 (defn definition-term? [expr]
   (named-literal-operator? expr definition-term-name))
 
+(defn supported-input-term? [expr]
+  (named-literal-operator? expr supported-input-term-name))
+
 (declare rewrite-expr*)
+
+(defn- named-symbol-application? [expr names]
+  (and (= :apply (ast/type expr))
+       (= :symbol (ast/type (ast/operator expr)))
+       (contains? names (ast/name (ast/operator expr)))))
+
+(defn- block-cell-application? [expr]
+  (named-symbol-application? expr '#{block block-at be:block be:block-at}))
+
+(defn- block-transport? [expr]
+  (and (named-symbol-application? expr '#{-> <->})
+       (block-cell-application? (peek (vec (ast/args expr))))))
+
+(defn- supported-input-term [context expr]
+  (if (supported-input-term? expr)
+    expr
+    (ast/app (ast/lit (supported-input-term-operator context)) expr)))
+
+(defn- rewrite-application-args [context expr]
+  (let [args (mapv #(rewrite-expr* context false %) (ast/args expr))]
+    (if (and (block-transport? expr) (<= 2 (count args)))
+      (update args (- (count args) 2) #(supported-input-term context %))
+      args)))
 
 (defn- rewrite-application
   [context expr]
-  (if (dependency-term? expr)
+  (if (or (dependency-term? expr) (supported-input-term? expr))
     expr
     (let [application (apply ast/app
                              (rewrite-expr* context false (ast/operator expr))
-                             (map #(rewrite-expr* context false %) (ast/args expr)))]
+                             (rewrite-application-args context expr))]
       (ast/app (ast/lit (dependency-term-operator context)) application))))
 
 (defn- callable-signature [inputs outputs implicit?]

@@ -18,18 +18,41 @@
     (catch Throwable _
       nil)))
 
+(def ^:private declaration-heads
+  '#{def def-cell def-cells def-net def-constraint
+     def-behavior def-behaviour def-behaviors def-behaviours
+     define-behaviors define-behaviours behavior behavior-cell})
+
+(def ^:private boundary-effect-heads
+  '#{be:block translate xr-io io:xr
+     slider-io slider-panel-io io:slider io:slider-panel
+     io:slider-panels io:slider-panel-name
+     load-primitive-environment load-lain save-environment
+     load-blocks save-blocks})
+
+(def ^:private transport-heads '#{-> <->})
+
+(defn- source-form [source]
+  (try
+    (compiler-parser/read-form source)
+    (catch Throwable _ nil)))
+
 (defn top-level-declaration? [source]
-  (contains? '#{def def-cell def-cells def-net def-constraint
-                def-behavior def-behaviour def-behaviors def-behaviours
-                define-behaviors define-behaviours
-                <-> -> block block-at be:block be:block-at translate
-                xr-io io:xr
-                slider-io slider-panel-io io:slider io:slider-panel
-                io:slider-panels io:slider-panel-name
-                load-primitive-environment load-lain save-environment
-                load-blocks save-blocks
-                behavior behavior-cell}
-             (top-level-form-head source)))
+  (contains? declaration-heads (top-level-form-head source)))
+
+(defn explicit-output-form?
+  "True when a form deliberately targets an external/runtime destination.
+
+  `->` and `<->` are ordinary sync expressions, not declarations.  Their
+  destination is nevertheless explicit, so the TUI must not add a second
+  implicit next-block destination."
+  [source]
+  (let [form (source-form source)
+        head (when (seq? form) (first form))]
+    (or (contains? boundary-effect-heads head)
+        (and (contains? '#{block-at be:block-at} head)
+             (>= (count form) 4))
+        (contains? transport-heads head))))
 
 (defn trace-source? [source]
   (= 'trace (top-level-form-head source)))
@@ -89,6 +112,7 @@
 
 (defn auto-output-source [state block source]
   (if (or (top-level-declaration? source)
+          (explicit-output-form? source)
           (nil? (block-by-index state (:client-id block) (inc (:index block)))))
     source
     (let [target-index (inc (:index block))]

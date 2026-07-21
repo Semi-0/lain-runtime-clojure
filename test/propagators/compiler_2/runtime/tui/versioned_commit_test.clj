@@ -271,6 +271,101 @@
       (is (every? #(contains? (net/net-env (:program/net @session)) %)
                   ids-before)))))
 
+(deftest edited-retained-application-retracts-its-old-next-block-display
+  (let [session (runtime/new-session)]
+    (runtime/register-tui! session {:client-id "A" :mode :versioned-premise})
+    (runtime/commit-version!
+     session
+     (block-request c0 0 nil
+                    "(def-net add-17 [x] [out] (+ x 17))"))
+    (runtime/commit-version!
+     session
+     (block-request c1 1 nil
+                    "(let-cell [out] (add-17 20 out) out)"))
+    (is (= 37 (get-in (runtime/read-tui-view @session {:client-id "A"})
+                      [:blocks 2 :value])))
+    (runtime/commit-version!
+     session
+     (block-request c2 1 0
+                    "(let-cell [out] (add-17 60 out) out)"))
+    (let [state @session
+          application-block (block-model/block-by-index state "A" 1)
+          display-block (block-model/block-by-index state "A" 2)
+          [old-record new-record] (:version-history application-block)
+          display-content (net/network-cell-content
+                           (:program/net state) (:display-id display-block))
+          display-view (-> display-content tms/distributed-slots tms/tms-view)]
+      (is (= 77 (get-in (runtime/read-tui-view state {:client-id "A"})
+                        [:blocks 2 :value])))
+      (is (tms/distributed-value? display-content))
+      (is (= 1 (count (tms/active-claims display-view))))
+      (is (= 1 (count (:tms/inactive-claims display-view))))
+      (is (contains? (tms/active-premises display-view)
+                     (:premise-id new-record)))
+      (is (not (contains? (tms/active-premises display-view)
+                          (:premise-id old-record)))))))
+
+(deftest block-is-a-cell-target-for-the-ordinary-sync-operator
+  (let [session (runtime/new-session)]
+    (runtime/register-tui! session {:client-id "A" :mode :versioned-premise})
+    (runtime/commit-version!
+     session
+     (block-request c0 0 nil "(-> (+ 20 30) (block 1))"))
+    (is (= 50 (get-in (runtime/read-tui-view @session {:client-id "A"})
+                      [:blocks 1 :value])))
+    (is (some #(and (prop/prop? %)
+                    (= :runtime/tui-block (prop/prop-name %)))
+              (vals (net/net-env (:program/net @session)))))
+    (runtime/commit-version!
+     session
+     (block-request c1 0 0 "(-> (+ 20 40) (block 1))"))
+    (let [state @session
+          source-block (block-model/block-by-index state "A" 0)
+          display-block (block-model/block-by-index state "A" 1)
+          [old-record new-record] (:version-history source-block)
+          display-content (net/network-cell-content
+                           (:program/net state) (:display-id display-block))
+          display-view (-> display-content tms/distributed-slots tms/tms-view)]
+      (is (= 60 (get-in (runtime/read-tui-view state {:client-id "A"})
+                        [:blocks 1 :value])))
+      (is (= 1 (count (tms/active-claims display-view))))
+      (is (contains? (tms/active-premises display-view)
+                     (:premise-id new-record)))
+      (is (not (contains? (tms/active-premises display-view)
+                          (:premise-id old-record)))))))
+
+(deftest declared-closure-output-to-block-follows-caller-version
+  (let [session (runtime/new-session)]
+    (runtime/register-tui! session {:client-id "A" :mode :versioned-premise})
+    (runtime/commit-version!
+     session
+     (block-request c0 0 nil
+                    "(def-net add-17 [x] [out] (+ x 17))"))
+    (runtime/commit-version!
+     session
+     (block-request c1 1 nil "(add-17 20 (block 2))"))
+    (is (= 37 (get-in (runtime/read-tui-view @session {:client-id "A"})
+                      [:blocks 2 :value])))
+    (runtime/commit-version!
+     session
+     (block-request c2 1 0 "(add-17 60 (block 2))"))
+    (let [state @session
+          caller-block (block-model/block-by-index state "A" 1)
+          display-block (block-model/block-by-index state "A" 2)
+          [old-record new-record] (:version-history caller-block)
+          display-content (net/network-cell-content
+                           (:program/net state) (:display-id display-block))
+          display-view (-> display-content tms/distributed-slots tms/tms-view)]
+      (is (= 77 (get-in (runtime/read-tui-view state {:client-id "A"})
+                        [:blocks 2 :value])))
+      (is (= #{77}
+             (set (map tms/claim-value
+                       (vals (tms/active-claims display-view))))))
+      (is (contains? (tms/active-premises display-view)
+                     (:premise-id new-record)))
+      (is (not (contains? (tms/active-premises display-view)
+                          (:premise-id old-record)))))))
+
 (deftest signature-repair-uses-stable-placeholders-and-visible-warnings
   (let [session (runtime/new-session)]
     (runtime/register-tui! session {:client-id "A" :mode :versioned-premise})
