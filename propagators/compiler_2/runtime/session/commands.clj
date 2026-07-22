@@ -1,6 +1,7 @@
 (ns propagators.compiler-2.runtime.session.commands
   "Public command dispatch for compiler-2 runtime."
   (:require [propagators.compiler-2.runtime.inspection.cells :as cells]
+            [propagators.compiler-2.runtime.session.clock :as clock]
             [propagators.compiler-2.runtime.session.input :as input]
             [propagators.compiler-2.runtime.session.instance-replay :as instance-replay]
             [propagators.compiler-2.runtime.session.program :as program]
@@ -74,6 +75,7 @@
                          (get-in @session [:runtime :temperature :samples]))
                         (throw (ex-info "unknown runtime op" {:op op})))})]
       (schedule-trace-refreshes! session)
+      (clock/schedule-subscriptions! session)
       response)
     (catch Throwable t
       ;; Import is transactional, including its diagnostic state.

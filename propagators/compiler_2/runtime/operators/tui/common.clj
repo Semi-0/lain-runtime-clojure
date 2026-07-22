@@ -6,6 +6,7 @@
             [propagators.datastructures.compound-object :as obj]
             [propagators.datastructures.tms.distributed :as tms]
             [propagators.compiler-2.operators.block-premise :as premise]
+            [propagators.datastructures.event :as event]
             [propagators.gur.flat :as fvm]
             [propagators.ids :as ids]
             [propagators.message :refer [message]]
@@ -127,8 +128,37 @@
   Returns nil for raw sources so explicit legacy display effects retain their
   existing outbox behavior."
   [network display-id source-id]
-  (let [contexts (vec (premise/binding-contexts network source-id))]
-    (when (seq contexts)
+  (let [contexts (vec (premise/binding-contexts network source-id))
+        source-content (net/network-cell-content network source-id)
+        event-source? (event/protocol-cell? network source-id)]
+    (cond
+      event-source?
+      (let [prop-id (runtime-ids/stable-node-id
+                     :tui :event-block-display display-id source-id)]
+        {:effects
+         [(fvm/declare-prop
+           prop-id :runtime/tui-event-block-display [source-id] [display-id]
+           (fn [_inputs _outputs current]
+             (let [content (net/network-cell-content current source-id)]
+               (if (event/event-content? content)
+                 (mapv (fn [fact]
+                         (message
+                          display-id
+                          (if (event/active? fact)
+                            (event/active-event
+                             display-id
+                             (event/source fact)
+                             (event/timestamp fact)
+                             (event/event-value fact))
+                            (event/retraction-event
+                             display-id
+                             (event/source fact)
+                             (event/timestamp fact)))))
+                       (event/latest-facts content))
+                 []))))]
+         :messages []})
+
+      (seq contexts)
       (let [state-ids (mapv :premise/state-cell contexts)
             inputs (into [source-id] state-ids)
             prop-id (runtime-ids/stable-node-id
@@ -155,7 +185,9 @@
         {:effects [(fvm/declare-prop prop-id
                                      :runtime/tui-block-display
                                      inputs [display-id] activate)]
-         :messages []}))))
+         :messages []})
+
+      :else nil)))
 
 (defn trace-target-value
   [label source-id]

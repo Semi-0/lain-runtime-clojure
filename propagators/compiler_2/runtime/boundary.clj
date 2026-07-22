@@ -73,3 +73,29 @@
           :boundary/kind (:boundary/kind request)
           :boundary/status status}
          details))
+
+(defn clock-subscribe-request
+  "Declare a runtime-owned wall-clock subscription.
+
+  The operator remains pure: only the boundary driver reads wall-clock time or
+  owns scheduling resources."
+  [effect-id target-id interval-ms contexts]
+  {:boundary/effect true
+   :boundary/id effect-id
+   :boundary/port :clock
+   :boundary/kind :clock/subscribe
+   :boundary/target {:cell-id target-id}
+   :boundary/payload {:interval-ms interval-ms
+                      :contexts (vec contexts)}})
+
+(defn inspection-profile-request
+  "Declare a one-shot profile of the next matching versioned block commit."
+  [effect-id instance-id block-index target-id contexts]
+  {:boundary/effect true
+   :boundary/id effect-id
+   :boundary/port :inspection
+   :boundary/kind :inspection/profile-next-commit
+   :boundary/target {:cell-id target-id}
+   :boundary/payload {:instance-id instance-id
+                      :block-index block-index
+                      :contexts (vec contexts)}})

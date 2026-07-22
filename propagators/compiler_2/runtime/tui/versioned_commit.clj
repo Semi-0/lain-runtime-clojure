@@ -8,6 +8,7 @@
             [propagators.compiler-2.runtime.session.program :as program]
             [propagators.compiler-2.runtime.session.state :as state]
             [propagators.compiler-2.runtime.inspection.temperature :as temperature]
+            [propagators.compiler-2.runtime.inspection.retraction :as retraction]
             [propagators.compiler-2.runtime.tui.session :as tui-session]
             [propagators.compiler-2.runtime.tui.version-history :as history]
             [propagators.compiler-2.operators.block-premise :as premise]
@@ -284,16 +285,46 @@
          (value/nothing? (:value block))
          (not (:referenced? block)))))
 
+(defn- publish-profile-reports
+  [runtime-state request receipt probes profile]
+  (let [report (retraction/build-report runtime-state request receipt profile)
+        updates (mapv (fn [probe]
+                        {:cell-id (:inspection/report-cell probe)
+                         :update (assoc report :probe/id (:inspection/id probe))})
+                      probes)
+        consumed (retraction/consume-probes runtime-state probes)]
+    (try
+      (input/apply-program-updates consumed updates
+                                   block-compiler/settle-current-props)
+      (catch Throwable t
+        (state/append-runtime-error
+         consumed
+         (state/runtime-error-entry {:phase :inspection/report-publication}
+                                    t))))))
+
 (defn commit-version!
   [session request]
   (let [result
         (locking session
           (state/ensure-session-state! session)
-          (let [{:keys [state receipt] :as result}
-                (commit-version-state @session request)]
+          (let [runtime-state (retraction/prune-probes @session)
+                probes (retraction/matching-probes runtime-state request)
+                captured (if (seq probes)
+                           (retraction/capture-commit
+                            (:program/net runtime-state)
+                            #(commit-version-state runtime-state request))
+                           {:result (commit-version-state runtime-state request)})
+                {next-state :state receipt :receipt :as result}
+                (:result captured)
+                profile (:profile captured)
+                next-state (if (and profile
+                                    (not (:replayed? receipt)))
+                             (publish-profile-reports next-state request receipt
+                                                      probes profile)
+                             next-state)]
             (when-not (:replayed? receipt)
               ;; Publish history/topology before crossing the effect boundary.
-              (reset! session state)
+              (reset! session next-state)
               (reset! session (effects/perform-boundary-effects @session)))
             result))]
     (when (and (= :committed (get-in result [:receipt :status]))

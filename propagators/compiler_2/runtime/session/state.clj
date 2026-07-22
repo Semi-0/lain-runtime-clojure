@@ -80,6 +80,10 @@
    :environment/source-ledger []
    :environment/load-stack []
    :environment/checkpoints {}
+   :clock/subscriptions {}
+   :clock/epochs {}
+   :inspection/probes {}
+   :inspection/seen-requests #{}
    :tui/focus-seq 0
    :block-order []
    :next-order 0

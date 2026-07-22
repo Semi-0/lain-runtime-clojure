@@ -4,6 +4,7 @@
             [propagators.compiler-2.runtime.boundary :as boundary]
             [propagators.compiler-2.runtime.boundary.display :as display]
             [propagators.compiler-2.runtime.inspection.graph-projection :as graphp]
+            [propagators.compiler-2.runtime.inspection.retraction :as retraction]
             [propagators.compiler-2.runtime.session.state :as state]
             [propagators.compiler-2.runtime.inspection.temperature :as temperature]
             [graph.compiler-2-semantic-repl :as semantic-repl]
@@ -248,6 +249,23 @@
           (update-in [:tui :effects] (fnil conj []) request))
       state)))
 
+(defn record-clock-subscription
+  [state request]
+  (let [subscription-id (:boundary/id request)
+        target-id (get-in request [:boundary/target :cell-id])
+        {:keys [interval-ms contexts]} (:boundary/payload request)
+        context (first contexts)
+        source-id (if context
+                    [:clock/source (:client/id context) (:block/id context)]
+                    [:clock/source target-id])]
+    (assoc-in state [:clock/subscriptions subscription-id]
+              {:clock/id subscription-id
+               :clock/source-id source-id
+               :clock/target-id target-id
+               :clock/interval-ms interval-ms
+               :clock/contexts (vec contexts)
+               :clock/request request})))
+
 (defn graph-score
   [request]
   (let [payload (:boundary/payload request)
@@ -261,6 +279,16 @@
 (defn delivery-key
   [request]
   (case [(:boundary/port request) (:boundary/kind request)]
+    [:inspection :inspection/profile-next-commit]
+    [(:boundary/port request)
+     (:boundary/kind request)
+     (:boundary/id request)]
+
+    [:clock :clock/subscribe]
+    [(:boundary/port request)
+     (:boundary/kind request)
+     (:boundary/id request)]
+
     [:tui :tui/write-display]
     [(:boundary/port request)
      (:boundary/kind request)
@@ -342,6 +370,10 @@
                            [:xr :xr/widget-register] (record-widget-register s request)
                            [:tui :tui/write-block] (record-tui-write s request)
                            [:tui :tui/write-display] (record-tui-display s request)
+                           [:clock :clock/subscribe]
+                           (record-clock-subscription s request)
+                           [:inspection :inspection/profile-next-commit]
+                           (retraction/record-probe s request)
                            s))
                        state
                        requests)]

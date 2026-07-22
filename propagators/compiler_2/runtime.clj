@@ -2,6 +2,7 @@
   "Shared compiler-2 runtime session for socket clients."
   (:require [propagators.compiler-2.runtime.inspection.cells :as cells]
             [propagators.compiler-2.runtime.session.commands :as commands]
+            [propagators.compiler-2.runtime.session.clock :as clock]
             [propagators.compiler-2.runtime.boundary.effects :as effects]
             [propagators.compiler-2.runtime.session.input :as input]
             [propagators.compiler-2.runtime.session.instance-replay :as instance-replay]
@@ -38,6 +39,8 @@
 (def commit-version! versioned-commit/commit-version!)
 (def export-instance instance-replay/export-instance)
 (def import-instance! instance-replay/import-instance!)
+(def schedule-clock-subscriptions! clock/schedule-subscriptions!)
+(def stop-clocks! clock/stop-all!)
 
 (defn- with-trace-refresh!
   [session result]
