@@ -37,10 +37,11 @@
     (event/event-projection? v)
     (let [slot-keys (obj/public-slot-keys v)]
       (if (= 1 (count slot-keys))
-        (obj/slot-value v (first slot-keys))
+        (project-value (obj/slot-value v (first slot-keys)))
         (into {}
               (map (fn [slot-key]
-                     [slot-key (obj/slot-value v slot-key)]))
+                     [slot-key (project-value
+                                (obj/slot-value v slot-key))]))
               slot-keys)))
 
     (or (event/event-content? v)
@@ -51,7 +52,7 @@
     (let [projected (tms/strongest-distributed-value v)]
       (if (value/unusable? projected)
         projected
-        (tms/distributed-base-value projected)))
+        (project-value (tms/distributed-base-value projected))))
 
     (net/network? v)
     (or (semantic-repl/display-cell-value v) "network")

@@ -25,7 +25,7 @@
 (def transient-heads
   '#{load-primitive-environment load-lain load-blocks
      save-environment save-blocks
-     block block-at be:block be:block-at trace trace-target
+     block block-at be:block be:block-at be:event-block-at trace trace-target
      xr-io io:xr})
 
 (defn canonical-file

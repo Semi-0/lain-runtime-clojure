@@ -131,6 +131,19 @@
   (update runtime-state :environment/source-ledger
           (fnil conj []) (semantic-source-record block record)))
 
+(defn- advance-runtime-commit-tick
+  [runtime-state]
+  (let [tick (input/next-runtime-commit-tick runtime-state)]
+    (-> runtime-state
+        (assoc :runtime/commit-tick tick)
+        (input/assoc-program-commit-tick tick))))
+
+(defn- refresh-subscribed-semantic-graph
+  [runtime-state]
+  (if (seq (:trace/subscriptions runtime-state))
+    (program/refresh-semantic-graph runtime-state)
+    runtime-state))
+
 (defn- compile-version
   [runtime-state block context source]
   (let [runtime-state (if (or (program/trace-form? source)
@@ -272,7 +285,9 @@
                                   (fnil conj [])
                                   (replay-commit request))
                           (append-semantic-source-record block record)
-                          (update-runtime-text block (:text request)))]
+                          (update-runtime-text block (:text request))
+                          advance-runtime-commit-tick
+                          refresh-subscribed-semantic-graph)]
         {:state committed
          :receipt (receipt record)}))))
 

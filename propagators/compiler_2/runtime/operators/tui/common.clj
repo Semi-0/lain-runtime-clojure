@@ -122,6 +122,35 @@
       state-update (tms/merge-distributed-content forwarded state-update)
       :else forwarded)))
 
+(defn- event-display-messages
+  [display-id content]
+  (mapv (fn [fact]
+          (message
+           display-id
+           (if (event/active? fact)
+             (event/active-event display-id
+                                 (event/source fact)
+                                 (event/timestamp fact)
+                                 (event/event-value fact))
+             (event/retraction-event display-id
+                                     (event/source fact)
+                                     (event/timestamp fact)))))
+        (event/latest-facts content)))
+
+(defn event-display-result
+  [display-id source-id]
+  (let [prop-id (runtime-ids/stable-node-id
+                 :tui :event-block-display display-id source-id)]
+    {:effects
+     [(fvm/declare-prop
+       prop-id :runtime/tui-event-block-display [source-id] [display-id]
+       (fn [_inputs _outputs current]
+         (let [content (net/network-cell-content current source-id)]
+           (if (event/event-content? content)
+             (event-display-messages display-id content)
+             []))))]
+     :messages []}))
+
 (defn supported-display-result
   "Connect a premise-supported source directly to a TUI block display cell.
 
@@ -133,30 +162,7 @@
         event-source? (event/protocol-cell? network source-id)]
     (cond
       event-source?
-      (let [prop-id (runtime-ids/stable-node-id
-                     :tui :event-block-display display-id source-id)]
-        {:effects
-         [(fvm/declare-prop
-           prop-id :runtime/tui-event-block-display [source-id] [display-id]
-           (fn [_inputs _outputs current]
-             (let [content (net/network-cell-content current source-id)]
-               (if (event/event-content? content)
-                 (mapv (fn [fact]
-                         (message
-                          display-id
-                          (if (event/active? fact)
-                            (event/active-event
-                             display-id
-                             (event/source fact)
-                             (event/timestamp fact)
-                             (event/event-value fact))
-                            (event/retraction-event
-                             display-id
-                             (event/source fact)
-                             (event/timestamp fact)))))
-                       (event/latest-facts content))
-                 []))))]
-         :messages []})
+      (event-display-result display-id source-id)
 
       (seq contexts)
       (let [state-ids (mapv :premise/state-cell contexts)

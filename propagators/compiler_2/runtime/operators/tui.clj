@@ -11,5 +11,6 @@
 (def instance-operator targets/instance-operator)
 (def block-at-operator effects/block-at-operator)
 (def be-block-at-operator effects/be-block-at-operator)
+(def be-event-block-at-operator effects/be-event-block-at-operator)
 (def be-block-target-operator effects/be-block-target-operator)
 (def translate-operator translate/translate-operator)

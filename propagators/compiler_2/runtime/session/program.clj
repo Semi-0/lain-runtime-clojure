@@ -268,6 +268,7 @@
   [graph-id]
   [['block-at (runtime-ops/block-at-operator (boundary-outbox-id))]
    ['be:block-at (runtime-ops/be-block-at-operator (boundary-outbox-id))]
+   ['be:event-block-at (runtime-ops/be-event-block-at-operator)]
    ['instance (runtime-ops/instance-operator)]
    ['trace-target (runtime-ops/trace-target-operator)]
    ['trace (runtime-ops/trace-operator graph-id (boundary-outbox-id))]

@@ -14,6 +14,7 @@
 (def tui-display-effect-request common/tui-display-effect-request)
 (def effect-tick common/effect-tick)
 (def supported-display-result common/supported-display-result)
+(def event-display-result common/event-display-result)
 
 (defn- write-block-messages
   [network outbox-id text-id source-id read-block?]
@@ -93,6 +94,26 @@
                     (throw (ex-info "be:block-at expects instance, index, and source"
                                     {:arg-ids arg-ids})))
                   (display-write-messages network outbox-id display-id source-id)))}))
+
+(defn be-event-block-at-operator []
+  (operator-value/operator-closure
+   {:name 'be:event-block-at
+    :output-selector (fn [arg-ids fallback-id]
+                       (or (nth (vec arg-ids) 2 nil) fallback-id))
+    :activate (fn [network _context-id arg-ids out-id]
+                (let [[instance-id index-id source-id] (vec arg-ids)
+                      source-id (or source-id out-id)
+                      display-id (when (and instance-id index-id)
+                                   (block-at-display-id network
+                                                        instance-id
+                                                        index-id))]
+                  (when-not (= 3 (count arg-ids))
+                    (throw (ex-info
+                            "be:event-block-at expects instance, index, and source"
+                            {:arg-ids arg-ids})))
+                  (if (and display-id source-id)
+                    (event-display-result display-id source-id)
+                    [])))}))
 
 (defn be-block-target-operator [outbox-id instance-id]
   (operator-value/operator-closure

@@ -24,7 +24,7 @@
      define-behaviors define-behaviours behavior behavior-cell})
 
 (def ^:private boundary-effect-heads
-  '#{be:block translate xr-io io:xr
+  '#{be:block be:event-block-at translate xr-io io:xr
      slider-io slider-panel-io io:slider io:slider-panel
      io:slider-panels io:slider-panel-name
      load-primitive-environment load-lain save-environment
@@ -107,18 +107,30 @@
       source)))
 
 (defn auto-output-display-form
-  [_source target-index]
-  (format "(be:block-at %% %d __runtime_out)" target-index))
+  ([source target-index]
+   (auto-output-display-form source target-index false))
+  ([source target-index event-trace?]
+   (let [form (source-form source)
+         trace-output (when (and event-trace?
+                                 (seq? form)
+                                 (= 'trace (first form)))
+                        (last form))]
+     (format "(%s %% %d %s)"
+             (if trace-output 'be:event-block-at 'be:block-at)
+             target-index
+             (or trace-output '__runtime_out)))))
 
 (defn auto-output-source [state block source]
   (if (or (top-level-declaration? source)
           (explicit-output-form? source)
           (nil? (block-by-index state (:client-id block) (inc (:index block)))))
     source
-    (let [target-index (inc (:index block))]
+    (let [target-index (inc (:index block))
+          versioned? (= :versioned-premise
+                        (get-in state [:tuis (:client-id block) :mode]))]
       (format "(let-cell [__runtime_out]
                  (-> %s __runtime_out)
                  %s
                  __runtime_out)"
               source
-              (auto-output-display-form source target-index)))))
+              (auto-output-display-form source target-index versioned?)))))

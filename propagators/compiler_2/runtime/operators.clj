@@ -12,6 +12,7 @@
 (def block-cell-operator tui/block-cell-operator)
 (def block-at-operator tui/block-at-operator)
 (def be-block-at-operator tui/be-block-at-operator)
+(def be-event-block-at-operator tui/be-event-block-at-operator)
 (def be-block-target-operator tui/be-block-target-operator)
 (def instance-operator tui/instance-operator)
 (def translate-operator tui/translate-operator)
