@@ -1792,11 +1792,21 @@
                                       (<-> (+ a bias) out))
                                     (add-bias x y)
                                     (-> 5 x)
-                                    y)")]
+                                    y)")
+          returned (compile-source "(let-cell [a b]
+                                     (def-constraint same [x y]
+                                       (<-> x y))
+                                     (-> 9 a)
+                                     (same a b))")
+          empty (compile-source "(let-cell []
+                                  (def-constraint constant [] 12)
+                                  (constant))")]
       (is (= 3 (strongest (run-compiled forward) (:cell forward))))
       (is (= 4 (strongest (run-compiled reverse) (:cell reverse))))
       (is (= 11 (strongest (run-compiled reused) (:cell reused))))
-      (is (= 7 (strongest (run-compiled lexical) (:cell lexical)))))))
+      (is (= 7 (strongest (run-compiled lexical) (:cell lexical))))
+      (is (= 9 (strongest (run-compiled returned) (:cell returned))))
+      (is (= 12 (strongest (run-compiled empty) (:cell empty)))))))
 
 (deftest compile-2-network-requires-explicit-output-applicant
   (testing "declared-output network calls do not synthesize hidden output cells"
