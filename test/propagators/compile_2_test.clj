@@ -1389,14 +1389,20 @@
                           (contains? (:outputs node) out-id))
                  (:inputs node))))))
 
-(deftest compile-2-parser-supports-network-closure-marker
-  (testing ":: parses into the internal network marker and requires explicit params"
-    (let [parsed (parse "(:: [x] (+ x 1))")]
-      (is (net/network? parsed))
-      (is (= :network (ast/type parsed)))
-      (is (= :network (obj/slot-value parsed ast/type-slot)))
-      (is (= '[x] (ast/inputs parsed)))
-      (is (= :apply (ast/type (ast/body parsed)))))
+(deftest compile-2-parser-supports-implicit-output-closures
+  (testing "cell-expr and :: parse as networks while cell is an application"
+    (let [marker (parse "(:: [x] (+ x 1))")
+          named (parse "(cell-expr [x] (+ x 1))")
+          retired (parse "(cell [x] (+ x 1))")]
+      (is (net/network? marker))
+      (is (= :network (ast/type marker)))
+      (is (= :network (obj/slot-value marker ast/type-slot)))
+      (is (= '[x] (ast/inputs marker)))
+      (is (= :apply (ast/type (ast/body marker))))
+      (is (= :network (ast/type named)))
+      (is (= '[x] (ast/inputs named)))
+      (is (= :apply (ast/type retired)))
+      (is (= 'cell (ast/name (ast/operator retired)))))
     (is (thrown-with-msg? clojure.lang.ExceptionInfo
                           #":: params must be a vector"
                           (parse "(:: (+ x 1))")))))
@@ -1413,13 +1419,12 @@
       (is (= '[same next] (ast/output def-net-ast))))))
 
 (deftest compile-2-parser-supports-def-and-def-cell
-  (testing "def binds an expression, def-cell binds free cells, expressions, and zero-output closures"
+  (testing "def binds expressions and def-cell lowers free cells and expressions to def"
     (let [def-ast (parse "(def answer (+ 1 2))")
           free-def-ast (parse "(def signal)")
           free-def-cell-ast (parse "(def-cell signal)")
           def-cells-ast (parse "(def-cells a b)")
-          expr-def-cell-ast (parse "(def-cell inc (cell [x] (+ x 1)))")
-          closure-cell-ast (parse "(def-cell inc [x] (+ x 1))")]
+          expr-def-cell-ast (parse "(def-cell inc (cell-expr [x] (+ x 1)))")]
       (is (= :def (ast/type def-ast)))
       (is (= 'answer (ast/name def-ast)))
       (is (= :apply (ast/type (ast/body def-ast))))
@@ -1432,9 +1437,9 @@
       (is (= :sequence (ast/type def-cells-ast)))
       (is (= :def (ast/type expr-def-cell-ast)))
       (is (= :network (ast/type (ast/body expr-def-cell-ast))))
-      (is (= :def-cell (ast/type closure-cell-ast)))
-      (is (= '[x] (ast/inputs closure-cell-ast)))
-      (is (= :apply (ast/type (ast/body closure-cell-ast)))))))
+      (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                            #"def-cell expression form expects only"
+                            (parse "(def-cell inc [x] (+ x 1))"))))))
 
 (deftest compile-2-parser-has-no-retired-special-forms
   (testing "retired behavior spellings and tombstones are ordinary applications"
@@ -1712,11 +1717,11 @@
           a-id (compiled-binding-id free-def-cells 'a)
           b-id (compiled-binding-id free-def-cells 'b)
           expr-cell (compile-source "(let-cell [out]
-                                       (def-cell inc (cell [x] (+ x 1)))
+                                       (def-cell inc (cell-expr [x] (+ x 1)))
                                        (<-> (inc 4) out)
                                        out)")
           named-cell (compile-source "(let-cell [out]
-                                        (def-cell inc [x] (+ x 1))
+                                        (def inc (:: [x] (+ x 1)))
                                         (<-> (inc 4) out)
                                         out)")
           expr-cell-net (run-compiled expr-cell)
@@ -1801,8 +1806,8 @@
          (compile-source "((network [x] [out] (+ x 1)) 4)")))))
 
 (deftest compile-2-cell-expression-returns-body-result
-  (testing "cell is the zero-output closure form for expression results"
-    (let [compiled (compile-source "((cell [x] (+ x 1)) 4)")
+  (testing "cell-expr is the zero-output closure form for expression results"
+    (let [compiled (compile-source "((cell-expr [x] (+ x 1)) 4)")
           result-net (run-compiled compiled)]
       (is (= 5 (strongest result-net (:cell compiled)))))))
 

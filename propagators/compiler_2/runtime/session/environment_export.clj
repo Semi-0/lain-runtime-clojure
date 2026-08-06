@@ -63,18 +63,24 @@
            :candidate (list* 'network inputs outputs body)})
 
         def-cell
-        (let [[_ _ maybe-inputs & body] form]
-          (if (vector? maybe-inputs)
-            {:head head :name name :callable? true
-             :inputs (vec maybe-inputs) :outputs [] :implicit? true
-             :candidate (list* 'cell maybe-inputs body)}
+        (let [[_ _ body] form
+              signature (closure-signature body)]
+          (cond
+            signature
+            (merge {:head head :name name :callable? true :candidate body}
+                   (select-keys signature [:inputs :outputs :implicit?]))
+
+            (some? body)
+            {:head head :name name :scalar? true :candidate body}
+
+            :else
             {:head head :name name :storage? true}))
 
         def-constraint
         (let [[_ _ applicants & body] form]
           {:head head :name name :callable? true
            :inputs (vec applicants) :outputs [] :implicit? true
-           :candidate (list* 'cell applicants
+           :candidate (list* 'cell-expr applicants
                              (concat body [(last applicants)]))})
 
         def

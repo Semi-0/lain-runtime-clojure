@@ -14,7 +14,7 @@
 (deftest definition-and-application-rewriting-is-idempotent
   (let [context (premise/premise-context :block 0)
         forms ["(def-net f [x] [out] (-> x out))"
-               "(def-cell f [x] (+ x 1))"
+               "(def f (cell-expr [x] (+ x 1)))"
                "(def-constraint same [x y] (<-> x y))"
                "(+ 1 2)"]]
     (doseq [source forms
@@ -38,7 +38,7 @@
   (doseq [[source expected]
           [["(def-net f [x] [out] (-> x out))"
             {:inputs 1 :outputs 1 :implicit? false}]
-           ["(def-cell f [x] (+ x 1))"
+           ["(def f (cell-expr [x] (+ x 1)))"
             {:inputs 1 :outputs 0 :implicit? true}]
            ["(def-constraint f [x y] (<-> x y))"
             {:inputs 2 :outputs 0 :implicit? true}]]]

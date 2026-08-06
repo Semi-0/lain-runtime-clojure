@@ -236,14 +236,6 @@
        (ast/compound {:inputs (ast/inputs expr) :output (ast/output expr)}
                      (rewrite-expr* context false (ast/body expr))))
 
-      :def-cell
-      (definition-term
-       name
-       (callable-signature (ast/inputs expr) [] true)
-       nil
-       (ast/network (ast/inputs expr)
-                    (rewrite-expr* context false (ast/body expr))))
-
       :def-constraint
       (let [inputs (ast/inputs expr)
             body (rewrite-expr* context false (ast/body expr))
@@ -289,7 +281,6 @@
     :def-net (if block-level? (rewrite-definition context expr) expr)
     :def-constraint (if block-level? (rewrite-definition context expr) expr)
     :def (if block-level? (rewrite-definition context expr) expr)
-    :def-cell (if block-level? (rewrite-definition context expr) expr)
     _ expr))
 
 (defn rewrite-expr

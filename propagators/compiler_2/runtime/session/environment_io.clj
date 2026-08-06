@@ -369,7 +369,7 @@
                                          (:index block) "_v"
                                          (:version record) "_archived_"
                                          position))
-                            (list 'cell [] form)))
+                            (list 'cell-expr [] form)))
                     (remove export/definition-form?
                             (source/read-source-forms (:source record)))))
                  (butlast records))]
