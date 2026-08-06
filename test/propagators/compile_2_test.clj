@@ -6,6 +6,7 @@
             [propagators.closure :as closure]
             [propagators.compile :as compile]
             [propagators.compiler-2.runtime.application :as compiler-app]
+            [propagators.compiler-2.runtime.session.program.source :as program-source]
             [propagators.compiler-2.model.application-value :as application-value]
             [propagators.compiler-2.language.ast :as ast]
             [propagators.compiler-2.model.closure-value :as closure-value]
@@ -859,40 +860,6 @@
     (is (= value/nothing (behavior-current-value n (:cell compiled))))
     (is (= [] (behavior-records content)))))
 
-#_(deftest compiler-2-behavior-declaration-sugar-retains-latest-events
-  (testing "def-behavior creates the behavior view and sibling event source"
-    (let [compiled (main/compile-source-with-behavior-tms
-                    "(def-behavior a)"
-                    {:net (behavior-tms-protocol-net)})]
-      (is (some? (env/lookup (:env compiled) 'a)))
-      (is (some? (env/lookup (:env compiled) 'a-events)))))
-  (testing "define-behaviors wires each event source into a latest-retaining behavior"
-    (let [compiled (main/compile-source-with-behavior-tms
-                    "(let-cell [out]
-                       (define-behaviors a b c)
-                       (behavior-event 1 10 a-events)
-                       (behavior-event 1 4 b-events)
-                       (behavior-event 1 3 c-events)
-                       (<-> (be:- (be:+ a b) c) out)
-                       out)"
-                    {:net (behavior-tms-protocol-net)})
-          n (run-compiled compiled)]
-      (is (= 11 (behavior-current-value n (:cell compiled))))
-      (is (= [{:at 1 :value 10}]
-             (behavior-records
-              (net/network-cell-content
-               n
-               (-> compiled :env (env/lookup 'a) env/binding-id)))))))
-  (testing "let-behaviour scopes behavior views and sibling event sources"
-    (let [compiled (main/compile-source-with-behavior-tms
-                    "(let-behaviour [a b]
-                       (behavior-event 1 2 a-events)
-                       (behavior-event 1 3 b-events)
-                       (be:+ a b))"
-                    {:net (behavior-tms-protocol-net)})
-          n (run-compiled compiled)]
-      (is (= 5 (behavior-current-value n (:cell compiled)))))))
-
 #_(deftest compiler-2-behavior-syntax-history-slices-return-behaviors
   (let [base-source "(let-cell [events retained out]
                        (def-net retain-all [acc next] [out]
@@ -1469,16 +1436,35 @@
       (is (= '[x] (ast/inputs closure-cell-ast)))
       (is (= :apply (ast/type (ast/body closure-cell-ast)))))))
 
-(deftest compile-2-parser-supports-behavior-sugar
-  (testing "behavior declaration aliases lower to ordinary compiler-2 sequences"
+(deftest compile-2-parser-has-no-retired-special-forms
+  (testing "retired behavior spellings and tombstones are ordinary applications"
     (doseq [source ["(def-behavior a)"
-                   "(def-behaviour a)"
-                   "(def-behaviors a b c)"
-                   "(define-behaviors a b c)"
-                   "(let-behaviour [a b] (+ a b))"
-                   "(let-behavior [a b] (+ a b))"]]
-      (is (#{:sequence :let-cell} (ast/type (parse source)))
-          source))))
+                    "(def-behaviour a)"
+                    "(def-behaviors a b c)"
+                    "(def-behaviours a b c)"
+                    "(define-behaviors a b c)"
+                    "(define-behaviours a b c)"
+                    "(let-behavior [a b] (+ a b))"
+                    "(let-behaviour [a b] (+ a b))"
+                    "(app-> f x)"
+                    "(let-network [x] x)"
+                    "(let-compound [x] x)"]]
+      (is (= :apply (ast/type (parse source))) source)))
+  (testing "retired behavior spellings are not runtime declarations"
+    (doseq [source ["(def-behavior a)"
+                    "(def-behaviours a b)"
+                    "(define-behaviors a b)"]]
+      (is (false? (program-source/top-level-declaration? source)) source)))
+  (testing "be:/ is no longer rewritten by the reader"
+    (is (thrown? Exception (parser/read-form "(be:/ a b)")))
+    (is (thrown? Exception (program-source/read-source-forms "(be:/ a b)")))
+    (is (= 'be:divide
+           (ast/name (ast/operator (parse "(be:divide a b)")))))))
+
+(deftest compiler-2-primitive-behavior-env-has-no-arithmetic-bindings
+  (let [compiler-env (behavior-env)]
+    (doseq [op ['be:+ 'be:- 'be:* 'be:divide]]
+      (is (nil? (env/lookup compiler-env op)) op))))
 
 (deftest compile-2-parser-supports-let-conditionals-and-def-constraint
   (testing "new immediate syntax parses onto compiler-2 AST"

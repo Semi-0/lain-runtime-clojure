@@ -19,9 +19,7 @@
       nil)))
 
 (def ^:private declaration-heads
-  '#{def def-cell def-cells def-net def-constraint
-     def-behavior def-behaviour def-behaviors def-behaviours
-     define-behaviors define-behaviours behavior behavior-cell})
+  '#{def def-cell def-cells def-net def-constraint behavior behavior-cell})
 
 (def ^:private boundary-effect-heads
   '#{be:block be:event-block-at translate xr-io io:xr
@@ -64,7 +62,6 @@
   (let [source (str/replace source
                             #"\(\s*::(?=\s)"
                             (str "(" compiler-parser/network-marker))
-        source (str/replace source #"(?<=\(|\s)be:/" "be:divide")
         reader (PushbackReader. (StringReader. source))]
     (loop [forms []]
       (let [form (edn/read {:eof source-reader-eof} reader)]
