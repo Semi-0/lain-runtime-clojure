@@ -1,0 +1,11 @@
+{:paths ["src"]
+ :deps {io.github.Semi-0/propagators-infra
+        {:git/url "https://github.com/Semi-0/propagators-infra.git"
+         :git/sha "4f541bd7b1c250be23ab422466333f885f696cc8"}
+        io.github.Semi-0/propagators-compiler
+        {:git/url "https://github.com/Semi-0/propagators-compiler.git"
+         :git/sha "265c2a4cfd2e44a24ec4ec8a4e9c7f11fc088296"}
+        meander/epsilon {:mvn/version "0.0.650"}}
+ :aliases {:test {:extra-paths ["test" "dev"]
+                  :main-opts ["-m" "run-tests"]}
+           :bench {:extra-paths ["dev/bench"]}}}

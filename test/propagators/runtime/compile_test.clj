@@ -1,5 +1,6 @@
 (ns propagators.runtime.compile-test
-  (:require [clojure.string :as str]
+  (:require [clojure.java.io :as io]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is testing]]
             [propagators.infra.cells.cell-protocol :as protocol]
             [propagators.infra.cells.value :as value]
@@ -1880,7 +1881,7 @@
 
 (deftest compile-2-application-output-adapter-is-not-materializing
   (testing "closure application projects result cells without a materialization helper"
-    (let [source (slurp "modules/compiler/src/propagators/compiler/lowering/application.clj")
+    (let [source (slurp (io/resource "propagators/compiler/lowering/application.clj"))
           direct (compile-source "((:: [x] (+ x 1)) 4)")
           late (compile-source "(let-cell [some-net out]
                                  (some-net 4 out)

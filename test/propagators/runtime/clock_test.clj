@@ -43,7 +43,7 @@
                        (request
                         "00000000-0000-0000-0000-000000000201" 0 nil
                         (str "(load-primitive-environment "
-                             "\"modules/runtime/dev/extensions/runtime_clock.clj\" "
+                             "\"dev/extensions/runtime_clock.clj\" "
                              ":extensions.runtime-clock/primitive-bindings 0)"))))))
       (is (true? (:ok (command
                        (request
@@ -92,7 +92,7 @@
       (command (request
                 "00000000-0000-0000-0000-000000000211" 0 nil
                 (str "(load-primitive-environment "
-                     "\"modules/runtime/dev/extensions/runtime_clock.clj\" "
+                     "\"dev/extensions/runtime_clock.clj\" "
                      ":extensions.runtime-clock/primitive-bindings 0)")))
       (command (request
                 "00000000-0000-0000-0000-000000000212" 1 nil

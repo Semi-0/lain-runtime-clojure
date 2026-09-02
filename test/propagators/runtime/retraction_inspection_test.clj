@@ -58,12 +58,12 @@
               (commit-request
                "00000000-0000-0000-0000-000000000301" "A" 0 nil
                (str "(load-primitive-environment "
-                    "\"modules/runtime/dev/extensions/runtime_inspection.clj\" "
+                    "\"dev/extensions/runtime_inspection.clj\" "
                     ":extensions.runtime-inspection/primitive-bindings 0)")))
     (command! session
               (commit-request
                "00000000-0000-0000-0000-000000000302" "A" 1 nil
-               "(load-lain \"modules/tui/dev/examples/lain/runtime-inspection.lain\" 0)"))
+               "(load-lain \"test/fixtures/runtime-inspection.lain\" 0)"))
     (command! session
               (commit-request
                "00000000-0000-0000-0000-000000000303" "A" 2 nil
