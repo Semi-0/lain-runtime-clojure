@@ -993,14 +993,25 @@
                                 read-forms
                                 [result-form]))))))
 
-(deftest compile-2-cdr-gated-list-map-chain-depths
-  (testing "compiler-2 map chains match the accumulating GUR hop depths"
-    (doseq [depth [5 10 15]]
-      (let [compiled (compile-source (compile-2-map-chain-source depth))
-            n (run-compiled compiled)
-            expected (* 5 (long (Math/pow 2 depth)))]
-        (is (= expected (strongest n (:cell compiled)))
-            (str "map-chain depth " depth))))))
+(defn- assert-compile-2-map-chain-depth
+  [depth]
+  (let [compiled (compile-source (compile-2-map-chain-source depth))
+        n (run-compiled compiled)
+        expected (* 5 (long (Math/pow 2 depth)))]
+    (is (= expected (strongest n (:cell compiled)))
+        (str "map-chain depth " depth))))
+
+(deftest compile-2-cdr-gated-list-map-chain-depth-5
+  (testing "compiler-2 map chains match the accumulating GUR hop depth 5"
+    (assert-compile-2-map-chain-depth 5)))
+
+(deftest compile-2-cdr-gated-list-map-chain-depth-10
+  (testing "compiler-2 map chains match the accumulating GUR hop depth 10"
+    (assert-compile-2-map-chain-depth 10)))
+
+(deftest compile-2-cdr-gated-list-map-chain-depth-15
+  (testing "compiler-2 map chains match the accumulating GUR hop depth 15"
+    (assert-compile-2-map-chain-depth 15)))
 
 (deftest compile-2-exposes-generic-slot
   (let [compiled (compile-source "(let-cell [obj]
