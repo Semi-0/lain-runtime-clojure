@@ -1,4 +1,4 @@
-(ns propagators.compiler-2.runtime.tui.version-history
+(ns propagators.compiler-2.runtime.session.version-history
   "Pure append-only version history and idempotency decisions.")
 
 (defn versions [block]

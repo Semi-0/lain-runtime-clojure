@@ -3,7 +3,7 @@
   (:require [clojure.edn :as edn]
             [clojure.string :as str]
             [clojure.walk :as walk]
-            [propagators.compiler-2.runtime.tui.block-model :as block-model]
+            [propagators.compiler-2.runtime.session.block-model :as block-model]
             [propagators.compiler-2.language.parser :as compiler-parser])
   (:import [java.io PushbackReader StringReader]))
 

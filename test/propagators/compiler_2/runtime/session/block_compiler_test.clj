@@ -1,7 +1,7 @@
-(ns propagators.compiler-2.runtime.tui.block-compiler-test
+(ns propagators.compiler-2.runtime.session.block-compiler-test
   (:require [clojure.test :refer [deftest is testing]]
             [propagators.compiler-2.runtime :as runtime]
-            [propagators.compiler-2.runtime.tui.block-compiler :as block-compiler]
+            [propagators.compiler-2.runtime.session.block-compiler :as block-compiler]
             [propagators.compiler-2.language.parser :as parser]
             [propagators.compiler-2.operators.block-premise :as premise]
             [propagators.compiler-2.operators.versioned-definition :as definition]

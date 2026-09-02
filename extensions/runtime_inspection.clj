@@ -7,7 +7,7 @@
             [propagators.compiler-2.runtime.boundary :as boundary]
             [propagators.compiler-2.runtime.ids :as runtime-ids]
             [propagators.compiler-2.runtime.inspection.retraction :as retraction]
-            [propagators.compiler-2.runtime.topology-effects :as topology-effects]
+            [propagators.compiler-2.lowering.topology-effects :as topology-effects]
             [propagators.datastructures.compound-object :as obj]
             [propagators.ids :as ids]
             [propagators.message :refer [message]]

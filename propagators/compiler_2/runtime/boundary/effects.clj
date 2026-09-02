@@ -1,13 +1,13 @@
 (ns propagators.compiler-2.runtime.boundary.effects
   "Boundary effect delivery for compiler-2 runtime."
-  (:require [propagators.compiler-2.runtime.tui.block-model :as block-model]
+  (:require [propagators.compiler-2.runtime.session.block-model :as block-model]
             [propagators.compiler-2.runtime.boundary :as boundary]
             [propagators.compiler-2.runtime.boundary.display :as display]
             [propagators.compiler-2.runtime.inspection.graph-projection :as graphp]
             [propagators.compiler-2.runtime.inspection.retraction :as retraction]
             [propagators.compiler-2.runtime.session.state :as state]
             [propagators.compiler-2.runtime.inspection.temperature :as temperature]
-            [graph.compiler-2-semantic-repl :as semantic-repl]
+            [propagators.compiler-2.runtime.inspection.semantic-graph :as semantic-repl]
             [propagators.cells.value :as value]
             [propagators.core :as core]
             [propagators.datastructures.compound-object :as obj]

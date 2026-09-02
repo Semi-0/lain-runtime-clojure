@@ -1,6 +1,6 @@
 (ns propagators.compiler-2.runtime.session.input
   "Runtime input commit and replay logic."
-  (:require [propagators.compiler-2.runtime.tui.block-model :as block-model]
+  (:require [propagators.compiler-2.runtime.session.block-model :as block-model]
             [propagators.compiler-2.runtime.boundary.effects :as effects]
             [propagators.compiler-2.runtime.inspection.graph-projection :as graphp]
             [propagators.compiler-2.runtime.session.program :as program]

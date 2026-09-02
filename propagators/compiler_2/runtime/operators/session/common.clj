@@ -1,4 +1,4 @@
-(ns propagators.compiler-2.runtime.operators.tui.common
+(ns propagators.compiler-2.runtime.operators.session.common
   "Shared TUI operator target lookup and effect request helpers."
   (:require [propagators.compiler-2.runtime.boundary :as boundary]
             [propagators.compiler-2.runtime.ids :as runtime-ids]

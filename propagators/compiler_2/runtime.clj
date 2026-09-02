@@ -11,8 +11,8 @@
             [propagators.compiler-2.runtime.inspection.temperature :as temperature]
             [propagators.compiler-2.runtime.inspection.trace.session :as trace-session]
             [propagators.compiler-2.runtime.inspection.trace.subscriptions :as trace-subscriptions]
-            [propagators.compiler-2.runtime.tui.session :as tui-session]
-            [propagators.compiler-2.runtime.tui.versioned-commit :as versioned-commit]
+            [propagators.compiler-2.runtime.session.clients :as tui-session]
+            [propagators.compiler-2.runtime.session.versioned-commit :as versioned-commit]
             [propagators.compiler-2.runtime.bridge.xr-projection :as xr-projection]))
 
 (def new-session state/new-session)

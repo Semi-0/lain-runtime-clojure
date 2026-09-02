@@ -3,7 +3,7 @@
   (:require [propagators.compiler-2.runtime.inspection.cells :as cells]
             [propagators.compiler-2.runtime.session.state :as state]
             [propagators.compiler-2.runtime.inspection.temperature :as temperature]
-            [graph.compiler-2-semantic-repl :as semantic-repl]
+            [propagators.compiler-2.runtime.inspection.semantic-graph :as semantic-repl]
             [propagators.core :as core]
             [propagators.ids :as ids]
             [propagators.message :refer [message]]

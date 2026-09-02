@@ -1,6 +1,6 @@
-(ns propagators.compiler-2.runtime.tui.version-history-test
+(ns propagators.compiler-2.runtime.session.version-history-test
   (:require [clojure.test :refer [deftest is testing]]
-            [propagators.compiler-2.runtime.tui.version-history :as history]
+            [propagators.compiler-2.runtime.session.version-history :as history]
             [propagators.compiler-2.operators.block-premise :as premise]))
 
 (def block-id :block/a)

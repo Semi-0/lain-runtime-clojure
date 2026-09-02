@@ -3,7 +3,7 @@
   (:require [propagators.compiler-2.runtime.operators.list-text :as list-text]
             [propagators.compiler-2.runtime.operators.environment :as environment]
             [propagators.compiler-2.runtime.operators.trace :as trace]
-            [propagators.compiler-2.runtime.operators.tui :as tui]
+            [propagators.compiler-2.runtime.operators.session :as tui]
             [propagators.compiler-2.runtime.operators.web-bridge :as web-bridge]
             [propagators.compiler-2.runtime.operators.xr :as xr]))
 

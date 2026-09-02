@@ -5,7 +5,7 @@
             [propagators.compiler-2.compiler.basis :as basis]
             [propagators.compiler-2.model.application-value :as application]
             [propagators.compiler-2.operators.versioned-definition :as definition]
-            [propagators.compiler-2.runtime.tui.block-model :as block-model]
+            [propagators.compiler-2.runtime.session.block-model :as block-model]
             [propagators.core :as core]
             [propagators.datastructures.compound-object :as obj]
             [propagators.datastructures.tms.distributed :as tms]

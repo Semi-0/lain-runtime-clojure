@@ -1,16 +1,16 @@
-(ns propagators.compiler-2.runtime.tui.versioned-commit
+(ns propagators.compiler-2.runtime.session.versioned-commit
   "Atomic append-only block-version commits for premise-aware TUI clients."
   (:require [clojure.string :as str]
-            [propagators.compiler-2.runtime.tui.block-model :as block-model]
-            [propagators.compiler-2.runtime.tui.block-compiler :as block-compiler]
+            [propagators.compiler-2.runtime.session.block-model :as block-model]
+            [propagators.compiler-2.runtime.session.block-compiler :as block-compiler]
             [propagators.compiler-2.runtime.boundary.effects :as effects]
             [propagators.compiler-2.runtime.session.input :as input]
             [propagators.compiler-2.runtime.session.program :as program]
             [propagators.compiler-2.runtime.session.state :as state]
             [propagators.compiler-2.runtime.inspection.temperature :as temperature]
             [propagators.compiler-2.runtime.inspection.retraction :as retraction]
-            [propagators.compiler-2.runtime.tui.session :as tui-session]
-            [propagators.compiler-2.runtime.tui.version-history :as history]
+            [propagators.compiler-2.runtime.session.clients :as tui-session]
+            [propagators.compiler-2.runtime.session.version-history :as history]
             [propagators.compiler-2.operators.block-premise :as premise]
             [propagators.compiler-2.operators.versioned-definition :as definition]
             [propagators.cells.value :as value]

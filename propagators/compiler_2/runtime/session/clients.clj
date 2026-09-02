@@ -1,12 +1,12 @@
-(ns propagators.compiler-2.runtime.tui.session
+(ns propagators.compiler-2.runtime.session.clients
   "TUI session and block operations for compiler-2 runtime."
   (:require [clojure.string :as str]
-            [propagators.compiler-2.runtime.tui.block-model :as block-model]
+            [propagators.compiler-2.runtime.session.block-model :as block-model]
             [propagators.compiler-2.runtime.session.input :as input]
             [propagators.compiler-2.runtime.session.program :as program]
             [propagators.compiler-2.runtime.session.state :as state]
             [propagators.compiler-2.runtime.inspection.temperature :as temperature]
-            [propagators.compiler-2.runtime.tui.annotations :as annotations]
+            [propagators.compiler-2.runtime.inspection.annotations :as annotations]
             [propagators.cells.value :as value]
             [propagators.compiler-2.operators.versioned-definition :as definition]
             [propagators.datastructures.tms :as tms]

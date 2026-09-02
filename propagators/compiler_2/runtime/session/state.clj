@@ -2,7 +2,7 @@
   "Shared compiler-2 runtime state primitives."
   (:require [propagators.compiler-2.runtime.boundary :as boundary]
             [propagators.compiler-2.runtime.ids :as runtime-ids]
-            [graph.vijual-compiler-2-demo :as demo]
+            [propagators.compiler-2.runtime.inspection.semantic-support :as demo]
             [propagators.cells.cell-protocol :as cell-protocol]
             [propagators.compile :as compile1]
             [propagators.compiler-2.compiler.basis :as compiler-helpers]

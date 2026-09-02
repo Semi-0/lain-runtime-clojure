@@ -1,4 +1,4 @@
-(ns propagators.compiler-2.runtime.operators.tui.translate
+(ns propagators.compiler-2.runtime.operators.session.translate
   "Small translation demo compiler-2 operator."
   (:require [propagators.compiler-2.model.operator-value :as operator-value]
             [propagators.message :refer [message]]

@@ -1,8 +1,8 @@
-(ns propagators.compiler-2.runtime.operators.tui
+(ns propagators.compiler-2.runtime.operators.session
   "TUI/block compiler-2 runtime operators."
-  (:require [propagators.compiler-2.runtime.operators.tui.effects :as effects]
-            [propagators.compiler-2.runtime.operators.tui.targets :as targets]
-            [propagators.compiler-2.runtime.operators.tui.translate :as translate]))
+  (:require [propagators.compiler-2.runtime.operators.session.effects :as effects]
+            [propagators.compiler-2.runtime.operators.session.targets :as targets]
+            [propagators.compiler-2.runtime.operators.session.translate :as translate]))
 
 (def block-target-operator targets/block-target-operator)
 (def p:block targets/p:block)

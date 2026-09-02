@@ -1,4 +1,4 @@
-(ns propagators.compiler-2.runtime.tui.block-model
+(ns propagators.compiler-2.runtime.session.block-model
   "Pure TUI block-model helpers for the compiler-2 runtime."
   (:require [propagators.network :as net]))
 

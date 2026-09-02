@@ -1,4 +1,4 @@
-(ns propagators.compiler-2.runtime.tui.block-compiler
+(ns propagators.compiler-2.runtime.session.block-compiler
   "Block-specific term rewriting over the canonical CPS compiler.
 
   Applications are rewritten into ordinary dependency-declaration terms. The

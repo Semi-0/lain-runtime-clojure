@@ -1,7 +1,7 @@
-(ns propagators.compiler-2.runtime.tui.annotations
+(ns propagators.compiler-2.runtime.inspection.annotations
   "Display annotations for projected TUI block values."
   (:require [clojure.string :as str]
-            [graph.compiler-2-semantic-repl :as semantic-repl]
+            [propagators.compiler-2.runtime.inspection.semantic-graph :as semantic-repl]
             [propagators.cells.value :as value]
             [propagators.datastructures.behavior :as behavior]
             [propagators.datastructures.compound-object :as obj]

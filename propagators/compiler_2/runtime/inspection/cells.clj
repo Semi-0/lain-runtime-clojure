@@ -1,7 +1,7 @@
 (ns propagators.compiler-2.runtime.inspection.cells
   "Cell listing and lookup helpers for compiler-2 runtime."
   (:require [propagators.compiler-2.runtime.session.state :as state]
-            [graph.compiler-2-semantic-repl :as semantic-repl]
+            [propagators.compiler-2.runtime.inspection.semantic-graph :as semantic-repl]
             [propagators.cells.cell :as cell]
             [propagators.compiler-2.model.env :as cenv]
             [propagators.network :as net]))

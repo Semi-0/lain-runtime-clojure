@@ -2,7 +2,7 @@
   "Runtime semantic graph projection helpers."
   (:require [clojure.set :as set]
             [propagators.compiler-2.runtime.session.state :as state]
-            [graph.compiler-2-semantic-repl :as semantic-repl]
+            [propagators.compiler-2.runtime.inspection.semantic-graph :as semantic-repl]
             [propagators.cells.cell :as cell]
             [propagators.cells.value :as value]
             [propagators.datastructures.behavior :as behavior]

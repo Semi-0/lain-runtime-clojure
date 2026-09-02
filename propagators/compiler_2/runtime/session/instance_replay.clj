@@ -2,9 +2,9 @@
   "Export and atomically replay versioned compiler-2 runtime instances."
   (:require [propagators.compiler-2.runtime.boundary.effects :as effects]
             [propagators.compiler-2.runtime.session.state :as state]
-            [propagators.compiler-2.runtime.tui.annotations :as annotations]
-            [propagators.compiler-2.runtime.tui.session :as tui-session]
-            [propagators.compiler-2.runtime.tui.versioned-commit :as versioned-commit]
+            [propagators.compiler-2.runtime.inspection.annotations :as annotations]
+            [propagators.compiler-2.runtime.session.clients :as tui-session]
+            [propagators.compiler-2.runtime.session.versioned-commit :as versioned-commit]
             [propagators.datastructures.tms.distributed :as tms]
             [propagators.network :as net]
             [propagators.propagator :as prop]))

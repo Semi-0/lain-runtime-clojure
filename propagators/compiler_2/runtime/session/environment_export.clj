@@ -6,7 +6,7 @@
   generated NodeId, scheduler state, or JVM function is serialized."
   (:require [clojure.string :as str]
             [propagators.compiler-2.runtime.session.program.source :as source]
-            [propagators.compiler-2.runtime.tui.block-model :as block-model]
+            [propagators.compiler-2.runtime.session.block-model :as block-model]
             [propagators.datastructures.tms :as tms]
             [propagators.network :as net]))
 

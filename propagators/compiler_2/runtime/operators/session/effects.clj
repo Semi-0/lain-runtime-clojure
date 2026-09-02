@@ -1,6 +1,6 @@
-(ns propagators.compiler-2.runtime.operators.tui.effects
+(ns propagators.compiler-2.runtime.operators.session.effects
   "TUI block write/display effect compiler-2 operators."
-  (:require [propagators.compiler-2.runtime.operators.tui.common :as common]
+  (:require [propagators.compiler-2.runtime.operators.session.common :as common]
             [propagators.cells.value :as value]
             [propagators.compiler-2.model.operator-value :as operator-value]
             [propagators.datastructures.compound-object :as obj]

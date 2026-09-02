@@ -1,12 +1,12 @@
-(ns propagators.compiler-2.runtime.tui.versioned-commit-test
+(ns propagators.compiler-2.runtime.session.versioned-commit-test
   (:require [clojure.test :refer [deftest is testing]]
             [propagators.compiler-2.runtime :as runtime]
-            [propagators.compiler-2.runtime.tui.block-model :as block-model]
+            [propagators.compiler-2.runtime.session.block-model :as block-model]
             [propagators.compiler-2.runtime.session.program :as program]
             [propagators.cells.value :as value]
             [propagators.compiler-2.operators.block-premise :as premise]
             [propagators.compiler-2.operators.versioned-definition :as definition]
-            [propagators.compiler-2.runtime.application :as compiler-app]
+            [propagators.compiler-2.lowering.application :as compiler-app]
             [propagators.datastructures.event :as event]
             [propagators.gur.flat :as fvm]
             [propagators.ids :as ids]

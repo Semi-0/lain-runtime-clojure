@@ -1,8 +1,8 @@
-(ns propagators.compiler-2.runtime.operators.tui.targets
+(ns propagators.compiler-2.runtime.operators.session.targets
   "TUI target and instance compiler-2 operators."
   (:require [propagators.compiler-2.compiler.basis :as basis]
             [propagators.compiler-2.runtime.ids :as runtime-ids]
-            [propagators.compiler-2.runtime.operators.tui.common :as common]
+            [propagators.compiler-2.runtime.operators.session.common :as common]
             [propagators.cells.value :as value]
             [propagators.compiler-2.model.operator-value :as operator-value]
             [propagators.datastructures.compound-object :as obj]

@@ -12,8 +12,8 @@
             [propagators.compiler-2.runtime.session.environment-export :as export]
             [propagators.compiler-2.runtime.session.program.source :as source]
             [propagators.compiler-2.runtime.session.state :as state]
-            [propagators.compiler-2.runtime.tui.block-model :as block-model]
-            [propagators.compiler-2.runtime.tui.versioned-commit :as versioned-commit]
+            [propagators.compiler-2.runtime.session.block-model :as block-model]
+            [propagators.compiler-2.runtime.session.versioned-commit :as versioned-commit]
             [propagators.network-builder :as nb])
   (:import [java.nio.charset StandardCharsets]
            [java.nio.file Files Path StandardCopyOption]
