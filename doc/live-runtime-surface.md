@@ -1,5 +1,9 @@
 # Live Runtime Surface
 
+See [Compiler Flat-GUR Runtime Integration](compiler-flat-gur-integration.md)
+for the current application-topology boundary and the experimental clock
+limitation.
+
 This note describes the current compiler-2 TUI/runtime experiment as a user
 interface model. It is not a replacement for the implementation notes in
 [`compiler-2.md`](compiler-2.md); it names what the system is becoming.

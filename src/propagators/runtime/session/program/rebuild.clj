@@ -5,7 +5,6 @@
             [propagators.runtime.inspection.temperature :as temperature]
             [propagators.runtime.inspection.semantic-graph :as semantic-repl]
             [propagators.infra.cells.value :as value]
-            [propagators.compiler.lowering.application :as compiler-app]
             [propagators.compiler.main :as compiler]
             [propagators.infra.core :as core]
             [propagators.infra.message :refer [message]]
@@ -15,14 +14,6 @@
 
 (def seed-appended-block-topology-state
   topology/seed-appended-block-topology-state)
-
-(defn- expose-application-boundary-outputs
-  [program-net]
-  (net/update-net-dict-entry
-   program-net
-   compiler-app/application-extra-output-ids-key
-   (fnil conj #{})
-   (program/boundary-outbox-id)))
 
 (defn- result-key
   [block]
@@ -34,11 +25,10 @@
     (let [source (program/normalize-trace-source source)
           source (program/auto-output-source state block source)
           graph-id (program/runtime-graph-id)
-          program-net-input (-> (:program/net state)
-                                expose-application-boundary-outputs
-                                (nb/install-cell graph-id
-                                                 (:graph state)
-                                                 (:graph state)))
+          program-net-input (nb/install-cell (:program/net state)
+                                             graph-id
+                                             (:graph state)
+                                             (:graph state))
           environment (program/runtime-env
                        state
                        program-net-input
@@ -259,7 +249,6 @@
     (let [source (program/normalize-trace-source source)
           graph-id (program/runtime-graph-id)
           program-net-input (-> (:program/net state)
-                                expose-application-boundary-outputs
                                 (nb/ensure-cell (program/boundary-outbox-id))
                                 (nb/install-cell graph-id
                                                  (:graph state)

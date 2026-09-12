@@ -7,11 +7,12 @@
   (:require [meander.epsilon :as m]
             [propagators.compiler.cps-core :as compiler]
             [propagators.compiler.language.ast :as ast]
-            [propagators.compiler.model.application-value :as application-value]
+            [propagators.compiler.model.closure-value :as closure-value]
             [propagators.compiler.model.env :as env]
             [propagators.compiler.model.operator-value :as operator-value]
             [propagators.compiler.operators.block-premise :as premise]
             [propagators.compiler.operators.versioned-definition :as definition]
+            [propagators.compiler.lowering.application :as application]
             [propagators.compiler.common.cps :as cps]
             [propagators.infra.datastructures.compound-object :as obj]
             [propagators.infra.network :as net]
@@ -36,22 +37,40 @@
    :expansions {}
    :edges []})
 
+(defn- application-input-ids
+  [network topology]
+  (let [operator-id (:operator-id topology)
+        operator
+        (cond
+          (contains? (net/net-env network) operator-id)
+          (net/network-cell-strongest network operator-id)
+
+          :else
+          nil)
+        declaration (operator-value/operator-declaration operator)
+        argument-ids (:argument-ids topology)]
+    (cond
+      (closure-value/closure-info? declaration)
+      (vec (take (count (closure-value/closure-inputs declaration))
+                 argument-ids))
+
+      :else
+      argument-ids)))
+
 (defn- application-contexts
-  [network application context]
-  (let [operator-id (obj/slot-value
-                     application application-value/application-operator-cell-slot)
-        arg-ids (obj/slot-value
-                 application application-value/application-arg-cells-slot)]
+  [network topology context]
+  (let [operator-id (:operator-id topology)
+        input-ids (application-input-ids network topology)]
     (reduce into #{context}
             (map #(premise/binding-contexts network %)
-                 (into [operator-id] arg-ids)))))
+                 (into [operator-id] input-ids)))))
 
 (defn- declare-application-dependence
-  [state application-id binding context]
+  [state topology binding context]
   (let [network (:net state)
+        application-id (:application-id topology)
         binding-id (env/binding-id binding)
-        application (net/network-cell-strongest network application-id)
-        contexts (application-contexts network application context)
+        contexts (application-contexts network topology context)
         dependence-id (premise/application-dependence-cell-id application-id)
         network (nb/ensure-cell network dependence-id)
         [prop-id installed]
@@ -74,17 +93,34 @@
     (throw (ex-info "block application dependence expects one application term"
                     {:operands operand-forms})))
   (let [application-count (count (:applications state))]
-    (cps/call
-     compile-k state (first operand-forms)
-     (fn [state binding]
-       (let [application-id (when (< application-count
-                                      (count (:applications state)))
-                              (peek (:applications state)))
-             state (if application-id
-                     (declare-application-dependence
-                      state application-id binding context)
-                     (record-term-context state binding context))]
-         (cps/continue k state binding))))))
+   (cps/call
+   compile-k state (first operand-forms)
+   (fn [state binding]
+     (let [application-id
+           (cond
+             (< application-count (count (:applications state)))
+             (peek (:applications state))
+
+             :else
+             nil)
+           topology
+           (cond
+             application-id
+             (or (application/application-topology (:net state) application-id)
+                 (throw
+                  (ex-info "Compiled application topology is unavailable"
+                           {:application-id application-id})))
+
+             :else
+             nil)
+           state (cond
+                   topology
+                   (declare-application-dependence
+                    state topology binding context)
+
+                   :else
+                   (record-term-context state binding context))]
+       (cps/continue k state binding))))))
 
 (defn dependency-term-operator
   [context]
@@ -142,13 +178,18 @@
     :direct-compiler
     (partial compile-definition-term name signature explicit)}))
 
-(defn- named-literal-operator? [expr name]
-  (and (= :apply (ast/type expr))
-       (let [operator (ast/operator expr)]
-         (and (= :literal (ast/type operator))
-              (= name
-                 (obj/slot-value (ast/value operator)
-                                 operator-value/name-slot))))))
+(defn- named-literal-operator?
+  [expr name]
+  (cond
+    (not= :apply (ast/type expr))
+    false
+
+    (not= :literal (ast/type (ast/operator expr)))
+    false
+
+    :else
+    (= name (operator-value/operator-name
+             (ast/value (ast/operator expr))))))
 
 (defn dependency-term? [expr]
   (named-literal-operator? expr dependency-term-name))
@@ -169,6 +210,9 @@
 (defn- block-cell-application? [expr]
   (named-symbol-application? expr '#{block block-at be:block be:block-at}))
 
+(defn- block-write-application? [expr]
+  (named-symbol-application? expr '#{be:block be:block-at}))
+
 (defn- block-transport? [expr]
   (and (named-symbol-application? expr '#{-> <->})
        (block-cell-application? (peek (vec (ast/args expr))))))
@@ -180,8 +224,14 @@
 
 (defn- rewrite-application-args [context expr]
   (let [args (mapv #(rewrite-expr* context false %) (ast/args expr))]
-    (if (and (block-transport? expr) (<= 2 (count args)))
+    (cond
+      (and (block-transport? expr) (<= 2 (count args)))
       (update args (- (count args) 2) #(supported-input-term context %))
+
+      (and (block-write-application? expr) (seq args))
+      (update args (dec (count args)) #(supported-input-term context %))
+
+      :else
       args)))
 
 (defn- rewrite-application

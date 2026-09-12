@@ -47,38 +47,16 @@
 
 (declare runtime-compiler)
 
-(defn runtime-application-installer
-  [application-id operator-id args-id arg-ids context-id out-id]
-  (compiler-app/p:apply-application-with runtime-compiler
-                                         application-id
-                                         operator-id
-                                         args-id
-                                         arg-ids
-                                         context-id
-                                         out-id))
-
 (defn runtime-compiler
   [compiler-state expr]
-  (compiler/default-compiler
-   (assoc compiler-state :application-installer runtime-application-installer)
-   expr))
+  (compiler/default-compiler compiler-state expr))
 
 (defn runtime-compile-options
   [opts]
-  (assoc opts
-         :compiler (or (:compiler opts) runtime-compiler)
-         :application-installer runtime-application-installer))
+  (assoc opts :compiler (or (:compiler opts) runtime-compiler)))
 
 (declare runtime-env
          settle-application-props)
-
-(defn- expose-application-boundary-outputs
-  [program-net]
-  (net/update-net-dict-entry
-   program-net
-   compiler-app/application-extra-output-ids-key
-   (fnil conj #{})
-   (boundary-outbox-id)))
 
 (defn compiled-state
   ([source]
@@ -88,7 +66,6 @@
      (let [graph-id (runtime-graph-id)
         base-state (assoc (empty-state) :runtime/options options)
         base-net (-> (:program/net base-state)
-                     expose-application-boundary-outputs
                      (nb/ensure-cell (boundary-outbox-id))
                      (nb/install-cell graph-id
                                       (semantic-trace/graph-union (empty-graph))
@@ -344,8 +321,11 @@
                              base-env
                              (into dynamic
                                    (static-runtime-bindings runtime-state graph-id)))
-             [network env-id] (cenv/import-environment network root-id initial)]
-         {:net network :env env-id :props []})
+             {:keys [net env-id prop-ids]}
+             (cenv/import-environment-topology network root-id initial)]
+         {:net (nb/run-propagators net prop-ids)
+          :env env-id
+          :props prop-ids})
        (let [child-id (state/stable-node-id :compiler-2 :runtime-env scope-key)
              scope-installer (if fixed-scope?
                                (cenv/p:scope-frame base-env child-id)
@@ -358,16 +338,9 @@
           :env child-id
           :props props})))))
 
-(defn retained-application-props
-  [program-net]
-  (vec (get (net/net-dict-or-empty program-net)
-            compiler-app/apply-application-props-key
-            #{})))
-
 (defn settle-application-props
   [program-net current-props]
-  (let [props (vec (distinct (concat (retained-application-props program-net)
-                                     current-props)))]
+  (let [props (vec (distinct current-props))]
     (-> program-net
         (nb/run-propagators props)
         (nb/run-propagators props))))
@@ -410,7 +383,6 @@
           top-level-trace? (trace-source? source)
           graph-id (runtime-graph-id)
           program-net-input (-> (:program/net state)
-                                expose-application-boundary-outputs
                                 (nb/ensure-cell (boundary-outbox-id))
                                 (nb/install-cell graph-id
                                                  (:graph state)
@@ -510,41 +482,43 @@
   [compiled program-net]
   (boolean
    (some (fn [app-id]
-           (let [application (net/network-cell-strongest program-net app-id)
-                 operator-id (obj/slot-value
-                              application
-                              compiler/application-operator-cell-slot)]
-             (or (nil? operator-id)
-                 (value/unusable?
-                  (net/network-cell-strongest program-net operator-id)))))
+           (let [topology (compiler-app/application-topology program-net app-id)
+                 operator-id (:operator-id topology)]
+             (cond
+               (nil? topology)
+               true
+
+               (nil? operator-id)
+               true
+
+               :else
+               (value/unusable?
+                (net/network-cell-strongest program-net operator-id)))))
          (:applications compiled))))
 
 (defn- repair-application-operator
   [state app-id]
   (let [program-net (:program/net state)
-        application (net/network-cell-strongest program-net app-id)
-        operator-ast (obj/slot-value
-                      application
-                      compiler/application-operator-ast-slot)
-        operator-id (obj/slot-value
-                     application
-                     compiler/application-operator-cell-slot)
-        sym (when (= :symbol (ast/type operator-ast))
-              (ast/name operator-ast))
+        topology (compiler-app/application-topology program-net app-id)
+        operator-id (:operator-id topology)
+        sym (get (cenv/binding-names program-net) operator-id)
         resolved-id (when sym
                       (cenv/resolve-binding-id program-net
                                                (:program/env state)
                                                sym))]
-    (if (and operator-id
-             resolved-id
-             (not= operator-id resolved-id)
-             (value/unusable?
-              (net/network-cell-strongest program-net operator-id))
-             (not (value/unusable?
-                   (net/network-cell-strongest program-net resolved-id))))
+    (cond
+      (and operator-id
+           resolved-id
+           (not= operator-id resolved-id)
+           (value/unusable?
+            (net/network-cell-strongest program-net operator-id))
+           (not (value/unusable?
+                 (net/network-cell-strongest program-net resolved-id))))
       (let [[prop-id installed]
             ((stdlib-prop/id resolved-id operator-id) program-net)]
         (assoc state :program/net (nb/run-propagators installed [prop-id])))
+
+      :else
       state)))
 
 (defn repair-unresolved-application-operators

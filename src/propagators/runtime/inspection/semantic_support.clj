@@ -4,6 +4,8 @@
             [propagators.compiler.language.ast :as ast]
             [propagators.compiler.model.closure-value :as closure-value]
             [propagators.compiler.model.env :as cenv]
+            [propagators.compiler.model.operator-value :as operator-value]
+            [propagators.compiler.lowering.application :as application]
             [propagators.compiler.main :as compiler]
             [propagators.infra.cells.value :as value]
             [propagators.infra.datastructures.compound-object :as obj]
@@ -126,32 +128,28 @@
   (vec
    (keep
     (fn [app-id]
-      (let [info (net/network-cell-strongest n app-id)
-            operator-ast (obj/slot-value
-                          info
-                          compiler/application-operator-ast-slot)
-            output-id (obj/slot-value
-                       info
-                       compiler/application-output-slot)]
-        (when (and operator-ast output-id)
-          {:app-id app-id
-           :operator-label (ast-label operator-ast)
-           :operator-cell (obj/slot-value
-                           info
-                           compiler/application-operator-cell-slot)
-           :args-id (obj/slot-value
-                     info
-                     compiler/application-args-slot)
-           :arg-cells (obj/slot-value
-                       info
-                       compiler/application-arg-cells-slot)
-           :context-id (obj/slot-value
-                        info
-                        compiler/application-context-slot)
-           :output-id output-id
-           :lowering (obj/slot-value
-                      info
-                      compiler/application-lowering-slot)})))
+      (let [topology (application/application-topology n app-id)]
+        (cond
+          topology
+          (let [operator-id (:operator-id topology)
+                operator
+                (cond
+                  (contains? (net/net-env n) operator-id)
+                  (net/network-cell-strongest n operator-id)
+
+                  :else
+                  nil)
+                operator-name (operator-value/operator-name operator)]
+            {:app-id app-id
+             :operator-label (display-name (or operator-name :application))
+             :operator-cell operator-id
+             :arg-cells (:argument-ids topology)
+             :context-id (:context-id topology)
+             :output-id (:result-id topology)
+             :lowering :flat-gur})
+
+          :else
+          nil)))
     (or (:applications compiled)
         (compiler/compiled-applications (:net compiled))))))
 
@@ -174,15 +172,14 @@
 (defn application-prop-labels [compiled n]
   (let [graph (net/net-graph n)]
     (into {}
-          (mapcat
-           (fn [{:keys [app-id output-id operator-label]}]
-             (keep (fn [[prop-id node]]
-                     (let [inputs (set (pgraph/node-input-ids node))
-                           outputs (set (pgraph/node-output-ids node))]
-                       (when (and (contains? inputs app-id)
-                                  (contains? outputs output-id))
-                         [prop-id (str "prop:" operator-label)])))
-                   graph))
+          (keep
+           (fn [{:keys [app-id operator-label]}]
+             (cond
+               (contains? graph app-id)
+               [app-id (str "prop:" operator-label)]
+
+               :else
+               nil))
            (application-records compiled n)))))
 
 (defn slot-prop-labels [n]
