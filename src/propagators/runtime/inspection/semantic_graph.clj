@@ -1,6 +1,7 @@
 (ns propagators.runtime.inspection.semantic-graph
   "Pure semantic graph construction and runtime value annotation."
-  (:require [clojure.edn :as edn]
+  (:require [propagators.compiler.lowering.application :as application]
+            [clojure.edn :as edn]
             [clojure.set :as set]
             [propagators.runtime.inspection.semantic-support :as demo]
             [propagators.infra.cells.value :as value]
@@ -263,9 +264,11 @@
 
 (defn- closure-value
   [n {:keys [operator-cell]}]
-  (let [v (net/network-cell-strongest n operator-cell)]
-    (when (closure-value/closure-info? v)
-      v)))
+  (let [v (net/network-cell-strongest n operator-cell)
+        declaration
+        (application/callable-declaration v)]
+    (when (closure-value/closure-info? declaration)
+      declaration)))
 
 (defn- closure-env
   [n labels {:keys [app-id arg-cells output-id]} closure-info]

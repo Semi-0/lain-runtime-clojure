@@ -2,7 +2,8 @@
   "Program-net topology seeding for compiler-2 runtime TUI blocks."
   (:require [propagators.runtime.session.program :as program]
             [propagators.infra.datastructures.compound-object :as obj]
-            [propagators.infra.network-builder :as nb]))
+            [propagators.infra.network-builder :as nb]
+            [propagators.infra.runner :as runner]))
 
 (defn- seed-instance
   [runtime-net [program-net props] {:keys [instance-id blocks-id]}]
@@ -63,7 +64,7 @@
         [program-net props] (reduce (partial seed-block runtime-net)
                                     [program-net props]
                                     (program/all-blocks state))]
-    (nb/run-propagators program-net props)))
+    (runner/completed-network (runner/run-network props program-net))))
 
 (defn seed-appended-block-topology-state
   [state client-id block previous-tail]
@@ -82,4 +83,6 @@
         [program-net props] (seed-block runtime-net
                                         [program-net props]
                                         block)]
-    (assoc state :program/net (nb/run-propagators program-net props))))
+    (assoc state :program/net
+           (runner/completed-network
+            (runner/run-network props program-net)))))

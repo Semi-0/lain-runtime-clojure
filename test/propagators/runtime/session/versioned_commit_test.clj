@@ -6,7 +6,6 @@
             [propagators.infra.cells.value :as value]
             [propagators.compiler.operators.block-premise :as premise]
             [propagators.compiler.operators.versioned-definition :as definition]
-            [propagators.compiler.lowering.application :as compiler-app]
             [propagators.infra.datastructures.event :as event]
             [propagators.infra.gur.flat :as fvm]
             [propagators.infra.ids :as ids]
@@ -134,7 +133,7 @@
       (is (not= (:premise-state-cell a-record)
                 (:premise-state-cell b-record))))))
 
-(deftest versioned-commit-does-not-settle-unrelated-retained-applications
+(deftest versioned-commit-does-not-settle-unrelated-propagators
   (let [session (runtime/new-session)
         activations (atom 0)
         prop-id (ids/new-node-id)]
@@ -142,24 +141,21 @@
     (runtime/commit-version! session (request c0 nil "1"))
     (let [[_ network]
           ((prop/construct-propagator
-            prop-id :test/unrelated-retained-application
+            prop-id :test/unrelated-propagator
             (fn [_inputs _outputs _network]
               (swap! activations inc)
               [])
             [] [])
            (:program/net @session))
-          network (net/update-net-dict-entry
-                   network compiler-app/apply-application-props-key
-                   (fnil conj #{}) prop-id)]
+          network network]
       (swap! session assoc :program/net network))
     (runtime/commit-version! session (request c1 0 "2"))
     (is (zero? @activations))))
 
 (deftest explicit-trace-refreshes-deferred-versioned-semantic-graph
   (let [session (runtime/new-session)
-        sources ["(def-cells a b c d)"
+        sources ["(def-cells a g)"
                  "(<-> (- 3 1) a)"
-                 "(def g)"
                  "(trace a :upstream g)"]]
     (runtime/register-tui! session {:client-id "A" :mode :versioned-premise})
     (doseq [[index source] (map-indexed vector sources)]
@@ -223,23 +219,24 @@
                     1 0 "(+ x 1)"))
     (is (= 7 (semantic-result @session "A" 1)))))
 
-(deftest closures-use-retained-application-and-compound-results-stay-raw
-  (testing "a closure definition remains raw while its scalar call is premised"
-    (let [session (runtime/new-session)]
-      (runtime/register-tui! session {:client-id "A" :mode :versioned-premise})
-      (runtime/commit-version!
-       session
-       (block-request c0 0 nil
-                      "(def inc (network [a] [b] (-> (+ a 1) b)))"))
-      (let [closure-cell (get-in @session
-                                 [:program/results ["A" 0] :compiled :cell])]
-        (is (not (tms/distributed-value?
-                  (net/network-cell-content (:program/net @session)
-                                            closure-cell)))))
-      (runtime/commit-version!
-       session
-       (block-request c1 1 nil "(let-cell [out] (inc 4 out) out)"))
-      (is (= 5 (semantic-result @session "A" 1)))))
+(deftest closure-definitions-stay-raw-and-calls-are-premised
+  (let [session (runtime/new-session)]
+    (runtime/register-tui! session {:client-id "A" :mode :versioned-premise})
+    (runtime/commit-version!
+     session
+     (block-request c0 0 nil
+                    "(def inc (network [a] [b] (-> (+ a 1) b)))"))
+    (let [closure-cell (get-in @session
+                               [:program/results ["A" 0] :compiled :cell])]
+      (is (not (tms/distributed-value?
+                (net/network-cell-content (:program/net @session)
+                                          closure-cell)))))
+    (runtime/commit-version!
+     session
+     (block-request c1 1 nil "(let-cell [out] (inc 4 out) out)"))
+    (is (= 5 (semantic-result @session "A" 1)))))
+
+(deftest compound-results-stay-raw-with-separate-premise-metadata
   (testing "list topology is raw and carries premise metadata separately"
     (let [session (runtime/new-session)]
       (runtime/register-tui! session {:client-id "A" :mode :versioned-premise})
@@ -271,7 +268,7 @@
       (is (every? #(contains? (net/net-env (:program/net @session)) %)
                   ids-before)))))
 
-(deftest edited-retained-application-retracts-its-old-next-block-display
+(deftest edited-application-retracts-its-old-next-block-display
   (let [session (runtime/new-session)]
     (runtime/register-tui! session {:client-id "A" :mode :versioned-premise})
     (runtime/commit-version!

@@ -1,0 +1,115 @@
+(def-net reverse-into
+  [source target]
+  [out]
+  (let [empty? (= source :compiler-2/list-empty)]
+    (when (switch true empty?)
+      (-> target out))
+    (when (switch true (not empty?))
+      (let [head (car source)
+            tail (cdr source)]
+        (reverse-into tail (cons head target) out)))))
+
+(def append
+  (:: [left right]
+    (let-cell [reversed out]
+      (reverse-into left :compiler-2/list-empty reversed)
+      (reverse-into reversed right out)
+      out)))
+
+(def-net trace-walk
+  [snapshot direction ready queued adjacent scan target origin visited edges root]
+  [out]
+  (let [scan-empty? (= scan :compiler-2/list-empty)
+        scan-more? (not scan-empty?)]
+    (when (switch true scan-more?)
+      (let [seen-node (car scan)
+            remaining-scan (cdr scan)
+            seen? (= target seen-node)]
+        (when (switch true seen?)
+          (trace-walk
+           snapshot direction ready queued adjacent :compiler-2/list-empty
+           :compiler-2.trace/no-node :compiler-2.trace/no-node
+           visited edges root out))
+        (when (switch true (not seen?))
+          (trace-walk
+           snapshot direction ready queued adjacent remaining-scan
+           target origin visited edges root out))))
+    (when (switch true scan-empty?)
+      (let [target-ready? (not (= target :compiler-2.trace/no-node))]
+        (when (switch true target-ready?)
+          (let [neighborhood (neighbors snapshot target)
+                inputs (p:slot :node/inputs neighborhood)
+                outputs (p:slot :node/outputs neighborhood)
+                upstream? (= direction :upstream)
+                downstream? (= direction :downstream)
+                both? (= direction :both)
+                next-visited (cons target visited)]
+            (let-cell [selected]
+              (when (switch true upstream?)
+                (-> inputs selected))
+              (when (switch true downstream?)
+                (-> outputs selected))
+              (when (switch true both?)
+                (let [combined (append inputs outputs)]
+                  (-> combined selected)))
+              (trace-walk
+               snapshot direction ready queued selected :compiler-2/list-empty
+               :compiler-2.trace/no-node target
+               next-visited edges root out))))
+        (when (switch true (not target-ready?))
+          (let [adjacent-empty? (= adjacent :compiler-2/list-empty)
+                adjacent-more? (not adjacent-empty?)]
+            (when (switch true adjacent-more?)
+              (let [neighbor (car adjacent)
+                    remaining-adjacent (cdr adjacent)
+                    edge (list origin neighbor)]
+                (trace-walk
+                 snapshot direction ready (cons neighbor queued)
+                 remaining-adjacent scan
+                 target origin visited (cons edge edges) root out)))
+            (when (switch true adjacent-empty?)
+              (let [ready-empty? (= ready :compiler-2/list-empty)
+                    ready-more? (not ready-empty?)]
+                (when (switch true ready-more?)
+                  (let [node (car ready)
+                        remaining-ready (cdr ready)]
+                    (trace-walk
+                     snapshot direction remaining-ready queued
+                     adjacent visited node origin
+                     visited edges root out)))
+                (when (switch true ready-empty?)
+                  (let [queued-empty? (= queued :compiler-2/list-empty)
+                        queued-more? (not queued-empty?)]
+                    (when (switch true queued-more?)
+                      (let-cell [next-ready]
+                        (reverse-into
+                         queued :compiler-2/list-empty next-ready)
+                        (trace-walk
+                         snapshot direction next-ready :compiler-2/list-empty
+                         adjacent scan target origin
+                         visited edges root out)))
+                    (when (switch true queued-empty?)
+                      (p:slot :trace/root root out)
+                      (p:slot :trace/direction direction out)
+                      (p:slot :trace/nodes visited out)
+                      (p:slot :trace/edges edges out))))))))))))
+
+(def trace-breadth-first
+  (:: [snapshot root direction]
+    (let-cell [out]
+      (trace-walk
+       snapshot direction
+       (list root)
+       :compiler-2/list-empty
+       :compiler-2/list-empty
+       :compiler-2/list-empty
+       :compiler-2.trace/no-node :compiler-2.trace/no-node
+       :compiler-2/list-empty
+       :compiler-2/list-empty
+       root out)
+      out)))
+
+(def trace-network-once
+  (:: [root direction]
+    (run-flat-gur-once
+     true trace-breadth-first root direction)))

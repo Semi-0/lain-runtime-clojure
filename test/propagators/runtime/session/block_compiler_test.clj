@@ -34,22 +34,30 @@
                             (:program/net @session) definition/candidates-key))]
       (is (= ['outer] (mapv :candidate/name candidates))))))
 
-(deftest callable-definition-lowerings-record-signatures
-  (doseq [[source expected]
-          [["(def-net f [x] [out] (-> x out))"
-            {:inputs 1 :outputs 1 :implicit? false}]
-           ["(def f (cell-expr [x] (+ x 1)))"
-            {:inputs 1 :outputs 0 :implicit? true}]
-           ["(def-constraint f [x y] (<-> x y))"
-            {:inputs 2 :outputs 0 :implicit? true}]]]
-    (testing source
-      (let [session (runtime/new-session)]
-        (runtime/register-tui! session {:client-id "A"
-                                        :mode :versioned-premise})
-        (runtime/commit-version!
-         session
-         (request "00000000-0000-0000-0000-000000000001" source))
-        (let [signature (-> (net/network-dict-entry
-                             (:program/net @session) definition/candidates-key)
-                            vals first :candidate/signature)]
-          (is (= expected (select-keys signature (keys expected)))))))))
+(defn assert-callable-signature
+  [source expected]
+  (let [session (runtime/new-session)]
+    (runtime/register-tui! session {:client-id "A"
+                                    :mode :versioned-premise})
+    (runtime/commit-version!
+     session
+     (request "00000000-0000-0000-0000-000000000001" source))
+    (let [signature (-> (net/network-dict-entry
+                         (:program/net @session) definition/candidates-key)
+                        vals first :candidate/signature)]
+      (is (= expected (select-keys signature (keys expected)))))))
+
+(deftest def-net-lowering-records-signature
+  (assert-callable-signature
+   "(def-net f [x] [out] (-> x out))"
+   {:inputs 1 :outputs 1 :implicit? false}))
+
+(deftest cell-expression-lowering-records-signature
+  (assert-callable-signature
+   "(def f (cell-expr [x] (+ x 1)))"
+   {:inputs 1 :outputs 0 :implicit? true}))
+
+(deftest constraint-lowering-records-signature
+  (assert-callable-signature
+   "(def-constraint f [x y] (<-> x y))"
+   {:inputs 2 :outputs 0 :implicit? true}))

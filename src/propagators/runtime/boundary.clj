@@ -32,6 +32,16 @@
    :boundary/receipt-id receipt-id
    :boundary/epoch epoch})
 
+(defn xr-view-request
+  [effect-id declaration receipt-id epoch]
+  {:boundary/effect true
+   :boundary/id effect-id
+   :boundary/port :xr
+   :boundary/kind :xr/present-view
+   :boundary/payload {:view declaration}
+   :boundary/receipt-id receipt-id
+   :boundary/epoch epoch})
+
 (defn xr-trace-subscribe-request
   [effect-id request target-id epoch]
   {:boundary/effect true

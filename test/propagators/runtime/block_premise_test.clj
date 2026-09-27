@@ -29,7 +29,7 @@
 (defn run-message
   [network m]
   (let [[tasks network] (core/eval-cells [m] network)]
-    (core/run-tasks tasks network)))
+    (nb/run-propagators network tasks)))
 
 (defn active-premises
   [network id]

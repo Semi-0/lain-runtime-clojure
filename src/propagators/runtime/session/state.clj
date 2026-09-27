@@ -3,12 +3,15 @@
   (:require [propagators.runtime.boundary :as boundary]
             [propagators.runtime.ids :as runtime-ids]
             [propagators.runtime.inspection.semantic-support :as demo]
+            [propagators.runtime.session.extension :as extension]
             [propagators.infra.cells.cell-protocol :as cell-protocol]
-            [propagators.infra.compile :as compile1]
             [propagators.compiler.compiler.basis :as compiler-helpers]
+            [propagators.compiler.model.env :as compiler-env]
             [propagators.infra.ids :as ids]
             [propagators.infra.network :as net]
-            [propagators.infra.network-cache :as network-cache])
+            [propagators.infra.network-builder :as nb]
+            [propagators.infra.network-cache :as network-cache]
+            [propagators.infra.runner :as runner])
   (:import [java.util.concurrent Executors]))
 
 (defn empty-graph []
@@ -56,32 +59,40 @@
 
 (defn install-runtime-protocols
   [n]
-  (-> n
-      (compile1/install-and-run (cell-protocol/install-cell-protocol))
-      (compile1/install-and-run (cell-protocol/install-event-protocol))
-      (compile1/install-and-run (cell-protocol/install-behavior-protocol))
-      (compile1/install-and-run (cell-protocol/install-tms-distributed-protocol))
-      (cell-protocol/prefer-direct-standard-protocols)))
+  (cell-protocol/prefer-direct-standard-protocols n))
 
 (defn runtime-base-net []
   (install-runtime-protocols net/empty-net))
 
+(defn runtime-root
+  [network]
+  (let [env-id (stable-node-id :compiler-2 :runtime :root-environment)
+        bindings ((requiring-resolve
+                   'propagators.compiler.operators.behavior/behavior-tms-bindings))
+        declared (compiler-env/declare-root network env-id bindings)]
+    (assoc declared
+           :net (runner/completed-network
+                 (runner/run-network (:props declared) (:net declared))))))
+
 (defn runtime-compiler-env []
-  ((requiring-resolve
-    'propagators.compiler.operators.behavior/bind-behavior-operators)
-   (compiler-helpers/default-env)))
+  (:env (runtime-root (runtime-base-net))))
 
 (defn empty-state []
-  {:network (install-runtime-protocols net/empty-net)
-   :program/net (runtime-base-net)
-   :program/env (runtime-compiler-env)
+  (let [root (runtime-root (runtime-base-net))]
+   {:network (install-runtime-protocols net/empty-net)
+   :program/net (:net root)
+   :program/env (:env root)
+   :program/props (:props root)
    :program/graph {:nodes {} :edges [] :values {} :expansions {}}
    :program/results {}
    :program/epoch 0
    :runtime/commit-tick 0
    :runtime/full-rebuild-fallbacks 0
+   :runtime/errors []
    :versioned/commit-log []
    :environment/effects {}
+   :environment/handlers (extension/default-handler-registry)
+   :session/extensions {}
    :environment/primitive-imports []
    :environment/source-ledger []
    :environment/load-stack []
@@ -95,15 +106,14 @@
    :next-order 0
    :traces {}
    :xr {:launched {}}
-   :tuis {}})
+   :tuis {}}))
 
 (defn- initialized-state?
   [state]
   (and (map? state)
        (net/network? (:network state))
        (net/network? (:program/net state))
-       (or (map? (:program/env state))
-           (ids/node-id? (:program/env state)))))
+       (ids/node-id? (:program/env state))))
 
 (defn- repair-partial-state
   [state]
@@ -169,6 +179,17 @@
             (->> (conj (vec errors) (assoc entry :at (System/currentTimeMillis)))
                  (take-last 20)
                  vec))))
+
+(defn record-runtime-error
+  [state source throwable]
+  (append-runtime-error state (runtime-error-entry source throwable)))
+
+(defn run-session-activation
+  [state source activate]
+  (try
+    (activate state)
+    (catch Throwable throwable
+      (record-runtime-error state source throwable))))
 
 (defn record-runtime-error!
   [session source throwable]

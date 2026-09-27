@@ -1,8 +1,8 @@
 (ns propagators.runtime.inspection.temperature
   "Runtime temperature telemetry sampled at commit/propagation/effect boundaries."
-  (:require [propagators.infra.core :as core]
-            [propagators.infra.helpers.task-queue :as tq]
-            [propagators.infra.network-builder :as nb]))
+  (:require [propagators.infra.helpers.task-queue :as tq]
+            [propagators.infra.network-builder :as nb]
+            [propagators.infra.runner :as runner]))
 
 (def max-samples 1000)
 
@@ -45,14 +45,16 @@
   [state phase tasks network]
   (let [queued (task-count tasks)
         started (System/nanoTime)
-        network' (core/run-tasks tasks network)]
+        network' (runner/completed-network
+                  (runner/run-network tasks network))]
     [(record state phase queued (elapsed-ms started)) network']))
 
 (defn run-propagators
   [state phase network prop-ids]
   (let [queued (task-count prop-ids)
         started (System/nanoTime)
-        network' (nb/run-propagators network prop-ids)]
+        network' (runner/completed-network
+                  (runner/run-network prop-ids network))]
     [(record state phase queued (elapsed-ms started)) network']))
 
 (defn- percentile

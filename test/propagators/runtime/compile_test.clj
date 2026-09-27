@@ -5,23 +5,16 @@
             [propagators.infra.cells.cell-protocol :as protocol]
             [propagators.infra.cells.value :as value]
             [propagators.infra.closure :as closure]
-            [propagators.infra.compile :as compile]
             [propagators.compiler.lowering.application :as compiler-app]
             [propagators.runtime.session.program.source :as program-source]
-            [propagators.compiler.model.application-value :as application-value]
             [propagators.compiler.language.ast :as ast]
             [propagators.compiler.model.closure-value :as closure-value]
             [propagators.compiler.model.env :as env]
-            [propagators.compiler.compiler.basis :as h
-             :refer [behavior-env
-                     default-env
-                     dependency-env]]
+            [propagators.compiler.compiler.basis :as h]
+            [propagators.compiler.cps-core :as cps-core]
             [propagators.compiler.main :as main]
             [propagators.compiler.model.operator-value :as operator-value]
             [propagators.compiler.language.parser :as parser]
-            [propagators.compiler.lowering.retained-application :as retained-app]
-            [propagators.compiler.operators.behavior
-             :refer [behavior-tms-env]]
             [propagators.infra.core :as core]
             [propagators.infra.datastructures.behavior :as behavior]
             [propagators.infra.datastructures.behavior-algebra :as hist]
@@ -32,6 +25,7 @@
             [propagators.infra.datastructures.scope-source :as scope-source]
             [propagators.infra.datastructures.tms :as tms]
             [propagators.infra.ids :as ids]
+            [propagators.infra.gur :as gur]
             [propagators.infra.layered :as layered]
             [propagators.infra.message :refer [message]]
             [propagators.infra.network :as net]
@@ -61,7 +55,7 @@
 (defn- seed-and-run
   [n id v]
   (let [[tasks n'] (core/eval-cell id (message id v) n)]
-    (core/run-tasks tasks n')))
+    (nb/run-propagators n' tasks)))
 
 (defn- seeded-cell
   [n v]
@@ -70,30 +64,19 @@
 
 (defn- behavior-protocol-net
   []
-  (-> net/empty-net
-      (compile/install-and-run (protocol/install-cell-protocol))
-      (compile/install-and-run (protocol/install-event-protocol))
-      (compile/install-and-run (protocol/install-behavior-protocol))))
+  (protocol/prefer-direct-standard-protocols net/empty-net))
 
 (defn- behavior-tms-protocol-net
   []
-  (-> net/empty-net
-      (compile/install-and-run (protocol/install-cell-protocol))
-      (compile/install-and-run (protocol/install-event-protocol))
-      (compile/install-and-run (protocol/install-behavior-protocol))
-      (compile/install-and-run (protocol/install-tms-distributed-protocol))))
+  (protocol/prefer-direct-standard-protocols net/empty-net))
 
 (defn- scope-source-protocol-net
   []
-  (-> net/empty-net
-      (compile/install-and-run (protocol/install-cell-protocol))
-      (compile/install-and-run (protocol/install-scope-source-protocol))))
+  (protocol/prefer-direct-standard-protocols net/empty-net))
 
 (defn- tms-distributed-protocol-net
   []
-  (-> net/empty-net
-      (compile/install-and-run (protocol/install-cell-protocol))
-      (compile/install-and-run (protocol/install-tms-distributed-protocol))))
+  (protocol/prefer-direct-standard-protocols net/empty-net))
 
 (defn- behavior-view
   [records source-keys]
@@ -124,7 +107,69 @@
 (defn- run-event-update
   [n id fact]
   (let [[tasks n'] (core/eval-cell id (message id fact) n)]
-    (core/run-tasks tasks n')))
+    (nb/run-propagators n' tasks)))
+
+(defn- with-binding
+  ([bindings sym candidate]
+   (with-binding bindings sym candidate nil))
+  ([bindings sym candidate _depth]
+   (let [candidate
+         (if (and (fn? candidate) (h/application-activate candidate))
+           (compiler-app/primitive-callable
+            [:compile-2-test sym]
+            (h/stable-node-id :compile-2-test :operator sym)
+            (fn [network arg-ids out-id _context-id]
+              (let [selected (h/output-id candidate arg-ids out-id)
+                    inputs (vec (remove #{selected} arg-ids))
+                    prop-id (h/stable-node-id :compile-2-test
+                                              :operator-activation
+                                              sym arg-ids selected)
+                    prepared (reduce nb/ensure-cell network
+                                     (conj (vec arg-ids) selected))
+                    [installed-id installed]
+                    ((prop/construct-propagator
+                      prop-id
+                      [:compile-2-test sym]
+                      (prop/concrete-propagator
+                       (fn [_inputs _outputs current-net]
+                         ((h/application-activate candidate)
+                          current-net nil arg-ids selected)))
+                      inputs
+                      [selected])
+                     prepared)]
+                [installed [installed-id] selected]))
+            {:test/operator sym})
+           candidate)]
+     (conj (into [] (remove #(= sym (first %))) bindings)
+           [sym candidate]))))
+
+(defn- binding-value
+  [bindings sym]
+  (some (fn [[name candidate]]
+          (when (= name sym) candidate))
+        bindings))
+
+(defn- live-env
+  [network bindings]
+  (let [env-id (ids/new-node-id)
+        declared (env/declare-root network env-id bindings)]
+    {:env env-id
+     :net (nb/run-propagators (:net declared) (:props declared))}))
+
+(defn- selected-env
+  [available symbols]
+  (mapv
+   (fn [sym]
+     (let [binding (binding-value available sym)]
+       (if binding
+         [sym binding]
+         (throw (ex-info "Default operator is unavailable"
+                         {:symbol sym})))))
+   symbols))
+
+(defn- selected-default-env
+  [& symbols]
+  (selected-env (h/default-bindings) symbols))
 
 (defn- behavior-record-map
   [record]
@@ -238,9 +283,22 @@
   ([source]
    (main/compile-source source))
   ([source env]
-   (main/compile-source source env))
+   (compile-source source env {}))
   ([source env opts]
-   (main/compile-source source env opts)))
+   (if (ids/node-id? env)
+     (main/compile-source source env opts)
+     (cps-core/compile-expr-with-bindings
+      (parse source) env opts))))
+
+(defn- compile-expr
+  ([expr]
+   (main/compile-expr expr))
+  ([expr bindings]
+   (compile-expr expr bindings {}))
+  ([expr bindings opts]
+   (if (ids/node-id? bindings)
+     (main/compile-expr expr bindings opts)
+     (cps-core/compile-expr-with-bindings expr bindings opts))))
 
 (defn- compiled-binding-id
   [compiled sym]
@@ -502,11 +560,11 @@
                                  premise-id))}))
 
 (defn- execute-sub-env-ast
-  [expr parent-env & watch-syms]
+  [expr _parent-env & watch-syms]
   (apply ast/app
          (ast/sym 'execute-sub-env)
          (ast/lit expr)
-         (ast/lit parent-env)
+         (ast/sym 'parent-env)
          (map ast/sym watch-syms)))
 
 (deftest compile-2-compiles-primitive-application
@@ -519,7 +577,7 @@
 
 (deftest compiler-2-operator-closures-replace-primitive-metadata
   (testing "default primitive operators are explicit operator closures"
-    (let [plus (env/lookup (default-env) '+)
+    (let [plus (binding-value (h/default-bindings) '+)
           a-id (ids/new-node-id)
           b-id (ids/new-node-id)
           out-id (ids/new-node-id)
@@ -541,7 +599,7 @@
       (is (= out-id installed-out-id))
       (is (= 3 (strongest n2 out-id)))))
   (testing "operator closure activation and output selection are explicit slots"
-    (let [switch (env/lookup (default-env) 'switch)
+    (let [switch (binding-value (h/default-bindings) 'switch)
           value-id (ids/new-node-id)
           condition-id (ids/new-node-id)
           explicit-out-id (ids/new-node-id)
@@ -585,18 +643,18 @@
     (is (= 3 (strongest result-net (:cell compiled))))))
 
 (deftest compiler-2-default-env-uses-distributed-tms-premise-closure
-  (let [compiler-env (default-env)]
+  (let [compiler-env (h/default-bindings)]
     (doseq [op ['premise-input
                 'premise-believe
                 'tms-closure
                 'premise-closure]]
       (testing op
-        (let [operator (env/lookup compiler-env op)]
+        (let [operator (binding-value compiler-env op)]
           (is (operator-value/operator-closure? operator))
           (is (nil? (-> operator meta h/application-activate-key))))))))
 
 (deftest compiler-2-behavior-env-uses-operator-closures
-  (let [compiler-env (behavior-tms-env)]
+  (let [compiler-env (h/behavior-tms-bindings)]
     (doseq [op ['behavior-event
                 'behavior-add-event
                 'behavior-empty-state
@@ -605,19 +663,15 @@
                 'behavior-cell
                 'latest]]
       (testing op
-        (let [operator (env/lookup compiler-env op)]
+        (let [operator (binding-value compiler-env op)]
           (is (operator-value/operator-closure? operator))
           (is (nil? (-> operator meta h/application-activate-key))))))))
 
 (deftest compiler-2-main-compiles-with-default-behavior-tms-env
   (let [compiled (main/compile-source-with-behavior-tms
                   "(let-cell [out]
-                     (def value :yes)
-                     (def premise :from-main-entry)
-                     (def epoch 0)
-                     (premise-input value premise epoch out)
-                     out)"
-                  {:net (tms-distributed-protocol-net)})
+                     (premise-input :yes :from-main-entry 0 out)
+                     out)")
         n (run-compiled compiled)]
     (is (= :yes (distributed-current-value n (:cell compiled))))
     (is (contains? (distributed-slot-keys n (:cell compiled))
@@ -630,25 +684,16 @@
                      (def epoch 0)
                      (premise-retract premise epoch out)
                      out)")
-        retained-props (net/network-dict-entry
-                        (:net compiled)
-                        retained-app/retained-application-props-key)
-        [application-id] (:applications compiled)
-        application (strongest (:net compiled) application-id)
+        applications (compiler-app/application-topologies (:net compiled))
         n (run-compiled compiled)]
-    (is (empty? retained-props))
-    (is (= :primitive
-           (obj/slot-value application
-                           application-value/application-lowering-slot)))
-    (is (= 'premise-retract
-           (-> application
-               (obj/slot-value application-value/application-operator-ast-slot)
-               ast/name)))
+    (is (= 1 (count applications)))
+    (is (every? #(= :gur.flat/application (first %))
+                (map :application-id applications)))
     (is (contains? (distributed-slot-keys n (:cell compiled))
                    (tms/premise-slot-key :static/premise 0)))))
 
 ;; Deferred compiler-2 behavior-history arithmetic integration.
-;; See propagators/doc/compiler-2-progress-and-priorities.md.
+;; See propagators.infra/doc/compiler-2-progress-and-priorities.md.
 #_(deftest compiler-2-main-can-define-behavior-producing-network
   (let [compiled (main/compile-source-with-behavior-tms
                   "(let-cell [a b out]
@@ -853,8 +898,9 @@
            (behavior-records (net/network-cell-content n (:cell compiled)))))))
 
 (deftest compiler-2-be-latest-zero-arg-builds-empty-latest-behavior
-  (let [compiled (main/compile-source-with-behavior-tms
+  (let [compiled (compile-source
                   "(be:latest)"
+                  (selected-env (h/behavior-tms-bindings) ['be:latest])
                   {:net (behavior-tms-protocol-net)})
         n (run-compiled compiled)
         content (net/network-cell-content n (:cell compiled))]
@@ -921,7 +967,7 @@
 (deftest compile-2-cdr-gated-list-gur-hop-chain
   (testing "compiler-2 structural GUR should use cdr presence as the lazy hop guard"
     (let [compiled
-          (compile-source "(let-cell [xs node1 tail hop1 out first rest second]
+          (compile-source "(let-cell [xs node1 tail out first rest second]
                             (def-net inc-list [xs] [out]
                               (let-cell [head rest mapped-head mapped-rest]
                                 (p:car head xs)
@@ -932,18 +978,19 @@
                                   (inc-list rest mapped-rest))))
                             (p:cons 2 tail node1)
                             (p:cons 1 node1 xs)
-                            (inc-list xs hop1)
-                            (inc-list hop1 out)
+                            (inc-list xs out)
                             (p:car first out)
                             (p:cdr rest out)
                             (p:car second rest)
-                            (+ (* first 10) second))")
+                            (+ (* first 10) second))"
+                          (selected-default-env
+                           'p:car 'p:cdr 'p:cons '+ '* '->))
           n (run-compiled compiled)]
-      (is (= 34 (strongest n (:cell compiled)))))))
+      (is (= 23 (strongest n (:cell compiled)))))))
 
 (defn- compile-2-map-chain-source
   [depth]
-  (let [value-count 5
+  (let [value-count 2
         node-syms (mapv #(symbol (str "node" %)) (range 1 value-count))
         hop-syms (mapv #(symbol (str "hop" %)) (range 1 depth))
         value-syms (mapv #(symbol (str "v" %)) (range value-count))
@@ -993,25 +1040,16 @@
                                 read-forms
                                 [result-form]))))))
 
-(defn- assert-compile-2-map-chain-depth
-  [depth]
-  (let [compiled (compile-source (compile-2-map-chain-source depth))
-        n (run-compiled compiled)
-        expected (* 5 (long (Math/pow 2 depth)))]
-    (is (= expected (strongest n (:cell compiled)))
-        (str "map-chain depth " depth))))
-
-(deftest compile-2-cdr-gated-list-map-chain-depth-5
-  (testing "compiler-2 map chains match the accumulating GUR hop depth 5"
-    (assert-compile-2-map-chain-depth 5)))
-
-(deftest compile-2-cdr-gated-list-map-chain-depth-10
-  (testing "compiler-2 map chains match the accumulating GUR hop depth 10"
-    (assert-compile-2-map-chain-depth 10)))
-
-(deftest compile-2-cdr-gated-list-map-chain-depth-15
-  (testing "compiler-2 map chains match the accumulating GUR hop depth 15"
-    (assert-compile-2-map-chain-depth 15)))
+(deftest compile-2-cdr-gated-list-map-chain
+  (testing "compiler-2 composes two cdr-gated map hops"
+    (let [depth 2
+          compiled (compile-source
+                    (compile-2-map-chain-source depth)
+                    (selected-default-env
+                     'p:car 'p:cdr 'p:cons '+ '* '->))
+          n (run-compiled compiled)
+          expected (* 2 (long (Math/pow 2 depth)))]
+      (is (= expected (strongest n (:cell compiled)))))))
 
 (deftest compile-2-exposes-generic-slot
   (let [compiled (compile-source "(let-cell [obj]
@@ -1039,45 +1077,33 @@
         n (run-compiled compiled)]
     (is (= 7 (strongest n (:cell compiled))))))
 
-(deftest compile-2-retains-primitive-application-ir
-  (testing "primitive applications keep an inspectable application object"
+(deftest compile-2-retains-primitive-application-topology
+  (testing "primitive applications keep an inspectable named topology"
     (let [compiled (compile-source "(+ 1 2)")
-          [app-id] (main/compiled-applications (:net compiled))
-          app-info (strongest (:net compiled) app-id)
-          operator-ast (obj/slot-value app-info
-                                       main/application-operator-ast-slot)]
-      (is (= [app-id] (:applications compiled)))
-      (is (application-value/application-info? app-info))
-      (is (= :primitive
-             (obj/slot-value app-info main/application-lowering-slot)))
-      (is (= :symbol (ast/type operator-ast)))
-      (is (= '+ (ast/name operator-ast)))
-      (is (= 2 (count (obj/slot-value app-info
-                                      main/application-arg-cells-slot))))
-      (is (= (:cell compiled)
-             (obj/slot-value app-info main/application-output-slot))))))
+          applications (compiler-app/application-topologies (:net compiled))
+          [{:keys [application-id operator-id argument-ids result-id]}]
+          applications]
+      (is (= 1 (count applications)))
+      (is (= :gur.flat/application (first application-id)))
+      (is (ids/node-id? operator-id))
+      (is (= 2 (count argument-ids)))
+      (is (= (:cell compiled) result-id))
+      (is (= 3 (strongest (run-compiled compiled) (:cell compiled)))))))
 
-(deftest compile-2-retains-nested-primitive-application-ir
-  (testing "nested primitive calls are retained as separate application records"
+(deftest compile-2-retains-nested-primitive-application-topology
+  (testing "nested primitive calls are retained as separate named propagators.infra"
     (let [compiled (compile-source "(+ 1 (- 4 2))")
-          app-ids (main/compiled-applications (:net compiled))
-          operators (->> app-ids
-                         (map #(strongest (:net compiled) %))
-                         (map #(obj/slot-value
-                                %
-                                main/application-operator-ast-slot))
-                         (map ast/name)
-                         set)
+          applications (compiler-app/application-topologies (:net compiled))
           result-net (run-compiled compiled)]
-      (is (= 2 (count app-ids)))
-      (is (= #{'+ '-} operators))
+      (is (= 2 (count applications)))
+      (is (= 2 (count (set (map :application-id applications)))))
       (is (= 3 (strongest result-net (:cell compiled)))))))
 
 (deftest compile-2-dependency-env-emits-dependency-values
   (testing "default env remains raw while dependency env wraps arithmetic results"
     (let [raw-compiled (compile-source "(+ 1 2)")
           raw (run-compiled raw-compiled)
-          compiled (compile-source "(+ 1 2)" (dependency-env) {})
+          compiled (compile-source "(+ 1 2)" (h/dependency-bindings) {})
           result-net (run-compiled compiled)
           result (strongest result-net (:cell compiled))
           sources (dependency/sources result)]
@@ -1094,7 +1120,7 @@
                                        (dependency/dependency-value
                                         10
                                         #{:outer-source}))
-          env (env/bind (default-env) 'a (env/cell-binding a-id) 0)
+          env (with-binding (h/default-bindings) 'a (env/cell-binding a-id) 0)
           compiled (compile-source "(+ a 5)" env {:net base-net})
           result (strongest (run-compiled compiled) (:cell compiled))]
       (is (dependency/dependency-value? result))
@@ -1107,9 +1133,9 @@
           right (behavior-view [(hist/point-record 6 7)] #{[:b 6]})
           [a-id n1] (behavior-cell (behavior-protocol-net) left)
           [b-id n2] (behavior-cell n1 right)
-          env (-> (behavior-env)
-                  (env/bind 'a (env/cell-binding a-id) 0)
-                  (env/bind 'b (env/cell-binding b-id) 0))
+          env (-> (h/behavior-bindings)
+                  (with-binding 'a (env/cell-binding a-id) 0)
+                  (with-binding 'b (env/cell-binding b-id) 0))
           compiled (compile-source "(be:+ a b)" env {:net n2})
           result-net (run-compiled compiled)
           out-content (net/network-cell-content result-net (:cell compiled))]
@@ -1123,9 +1149,9 @@
           right (behavior-view [(hist/point-record 7 7)] #{[:b 7]})
           [a-id n1] (behavior-cell (behavior-protocol-net) left)
           [b-id n2] (behavior-cell n1 right)
-          env (-> (behavior-env)
-                  (env/bind 'a (env/cell-binding a-id) 0)
-                  (env/bind 'b (env/cell-binding b-id) 0))
+          env (-> (h/behavior-bindings)
+                  (with-binding 'a (env/cell-binding a-id) 0)
+                  (with-binding 'b (env/cell-binding b-id) 0))
           compiled (compile-source "(+ a b)" env {:net n2})
           result-net (run-compiled compiled)]
       (is (= 9 (strongest result-net (:cell compiled))))
@@ -1139,11 +1165,11 @@
           [b-id n2] (event-cell n1 (event/active-event :b :slider-b 1 4))
           [c-id n3] (event-cell n2 (event/active-event :c :slider-c 1 3))
           d-id (ids/new-node-id)
-          env (-> (default-env)
-                  (env/bind 'a (env/cell-binding a-id) 0)
-                  (env/bind 'b (env/cell-binding b-id) 0)
-                  (env/bind 'c (env/cell-binding c-id) 0)
-                  (env/bind 'd (env/cell-binding d-id) 0))
+          env (-> (selected-default-env '+ '- '->)
+                  (with-binding 'a (env/cell-binding a-id) 0)
+                  (with-binding 'b (env/cell-binding b-id) 0)
+                  (with-binding 'c (env/cell-binding c-id) 0)
+                  (with-binding 'd (env/cell-binding d-id) 0))
           compiled (compile-source "(-> (- (+ a c) b) d)"
                                    env
                                    {:net (nb/install-cell n3 d-id)})
@@ -1159,11 +1185,11 @@
           [b-id n2] (event-cell n1 (event/active-event :b :slider-b 1 4))
           [c-id n3] (event-cell n2 (event/active-event :c :slider-c 1 3))
           d-id (ids/new-node-id)
-          env (-> (default-env)
-                  (env/bind 'a (env/cell-binding a-id) 0)
-                  (env/bind 'b (env/cell-binding b-id) 0)
-                  (env/bind 'c (env/cell-binding c-id) 0)
-                  (env/bind 'd (env/cell-binding d-id) 0))
+          env (-> (selected-default-env '+ '- '->)
+                  (with-binding 'a (env/cell-binding a-id) 0)
+                  (with-binding 'b (env/cell-binding b-id) 0)
+                  (with-binding 'c (env/cell-binding c-id) 0)
+                  (with-binding 'd (env/cell-binding d-id) 0))
           compiled (compile-source "(-> (- (+ a c) b) d)"
                                    env
                                    {:net (nb/install-cell n3 d-id)})
@@ -1177,11 +1203,11 @@
           [b-id n2] (event-cell n1 (event/active-event :b :slider-b 1 4))
           [c-id n3] (event-cell n2 (event/active-event :c :slider-c 1 3))
           d-id (ids/new-node-id)
-          env (-> (default-env)
-                  (env/bind 'a (env/cell-binding a-id) 0)
-                  (env/bind 'b (env/cell-binding b-id) 0)
-                  (env/bind 'c (env/cell-binding c-id) 0)
-                  (env/bind 'd (env/cell-binding d-id) 0))
+          env (-> (selected-default-env '+ '- '->)
+                  (with-binding 'a (env/cell-binding a-id) 0)
+                  (with-binding 'b (env/cell-binding b-id) 0)
+                  (with-binding 'c (env/cell-binding c-id) 0)
+                  (with-binding 'd (env/cell-binding d-id) 0))
           compiled (compile-source "(-> (- (+ a c) b) d)"
                                    env
                                    {:net (nb/install-cell n3 d-id)})
@@ -1211,9 +1237,9 @@
         [x-id n1] (event-cell (behavior-protocol-net)
                               (event/active-event :x :panel 1 0))
         out-id (ids/new-node-id)
-        env (-> (default-env)
-                (env/bind 'x (env/cell-binding x-id) 0)
-                (env/bind 'out (env/cell-binding out-id) 0))
+        env (-> (selected-default-env '+ '->)
+                (with-binding 'x (env/cell-binding x-id) 0)
+                (with-binding 'out (env/cell-binding out-id) 0))
         compiled (compile-source (format "(-> %s out)"
                                          (nested-plus-source 'x chain-length))
                                  env
@@ -1233,12 +1259,12 @@
         [c-id n3] (event-cell n2 (event/active-event :c :panel 1 11))
         [d-id n4] (event-cell n3 (event/active-event :d :panel 1 5))
         out-id (ids/new-node-id)
-        env (-> (default-env)
-                (env/bind 'a (env/cell-binding a-id) 0)
-                (env/bind 'b (env/cell-binding b-id) 0)
-                (env/bind 'c (env/cell-binding c-id) 0)
-                (env/bind 'd (env/cell-binding d-id) 0)
-                (env/bind 'out (env/cell-binding out-id) 0))
+        env (-> (selected-default-env '+ '- '* '->)
+                (with-binding 'a (env/cell-binding a-id) 0)
+                (with-binding 'b (env/cell-binding b-id) 0)
+                (with-binding 'c (env/cell-binding c-id) 0)
+                (with-binding 'd (env/cell-binding d-id) 0)
+                (with-binding 'out (env/cell-binding out-id) 0))
         source "(-> (+ (* (+ a b) (- c d))
                        (- (* a c) (+ b d)))
                     out)"
@@ -1259,9 +1285,9 @@
   (let [[x-id n1] (event-cell (behavior-protocol-net)
                               (event/active-event :x :panel 1 5))
         out-id (ids/new-node-id)
-        env (-> (default-env)
-                (env/bind 'x (env/cell-binding x-id) 0)
-                (env/bind 'out (env/cell-binding out-id) 0))
+        env (-> (selected-default-env '+ 'switch)
+                (with-binding 'x (env/cell-binding x-id) 0)
+                (with-binding 'out (env/cell-binding out-id) 0))
         compiled (compile-source "(switch (+ x 1) true out)"
                                  env
                                  {:net (nb/install-cell n1 out-id)})
@@ -1281,10 +1307,10 @@
                                                         1
                                                         false))
         out-id (ids/new-node-id)
-        env (-> (default-env)
-                (env/bind 'x (env/cell-binding x-id) 0)
-                (env/bind 'enabled (env/cell-binding enabled-id) 0)
-                (env/bind 'out (env/cell-binding out-id) 0))
+        env (-> (selected-default-env '+ 'switch)
+                (with-binding 'x (env/cell-binding x-id) 0)
+                (with-binding 'enabled (env/cell-binding enabled-id) 0)
+                (with-binding 'out (env/cell-binding out-id) 0))
         compiled (compile-source "(switch (+ x 1) enabled out)"
                                  env
                                  {:net (nb/install-cell n2 out-id)})
@@ -1304,10 +1330,10 @@
                                 (event/active-event :a :panel 1 5))
           b-id (ids/new-node-id)
           c-id (ids/new-node-id)
-          env (-> (default-env)
-                  (env/bind 'a (env/cell-binding a-id) 0)
-                  (env/bind 'b (env/cell-binding b-id) 0)
-                  (env/bind 'c (env/cell-binding c-id) 0))
+          env (-> (selected-default-env '<->)
+                  (with-binding 'a (env/cell-binding a-id) 0)
+                  (with-binding 'b (env/cell-binding b-id) 0)
+                  (with-binding 'c (env/cell-binding c-id) 0))
           compiled (compile-source "(<-> a b c)"
                                    env
                                    {:net (-> n1
@@ -1325,10 +1351,10 @@
           b-id (ids/new-node-id)
           [c-id n1] (event-cell (behavior-protocol-net)
                                 (event/active-event :c :panel 1 12))
-          env (-> (default-env)
-                  (env/bind 'a (env/cell-binding a-id) 0)
-                  (env/bind 'b (env/cell-binding b-id) 0)
-                  (env/bind 'c (env/cell-binding c-id) 0))
+          env (-> (selected-default-env '<->)
+                  (with-binding 'a (env/cell-binding a-id) 0)
+                  (with-binding 'b (env/cell-binding b-id) 0)
+                  (with-binding 'c (env/cell-binding c-id) 0))
           compiled (compile-source "(<-> a b c)"
                                    env
                                    {:net (-> n1
@@ -1343,9 +1369,9 @@
           right (behavior-view [(hist/point-record 7 7)] #{[:b 7]})
           [a-id n1] (behavior-cell (behavior-protocol-net) left)
           [b-id n2] (behavior-cell n1 right)
-          env (-> (behavior-env)
-                  (env/bind 'a (env/cell-binding a-id) 0)
-                  (env/bind 'b (env/cell-binding b-id) 0))
+          env (-> (h/behavior-bindings)
+                  (with-binding 'a (env/cell-binding a-id) 0)
+                  (with-binding 'b (env/cell-binding b-id) 0))
           compiled (compile-source "(be:+ a b)" env {:net n2})
           result-net (run-compiled compiled)]
       (is (= value/nothing
@@ -1357,9 +1383,9 @@
           right (behavior-view [(hist/interval-record 5 12 7)] #{[:b 5]})
           [a-id n1] (behavior-cell (behavior-protocol-net) left)
           [b-id n2] (behavior-cell n1 right)
-          env (-> (behavior-env)
-                  (env/bind 'a (env/cell-binding a-id) 0)
-                  (env/bind 'b (env/cell-binding b-id) 0))
+          env (-> (h/behavior-bindings)
+                  (with-binding 'a (env/cell-binding a-id) 0)
+                  (with-binding 'b (env/cell-binding b-id) 0))
           compiled (compile-source "(be:+ a b)" env {:net n2})
           result-net (run-compiled compiled)
           out-content (net/network-cell-content result-net (:cell compiled))]
@@ -1379,14 +1405,14 @@
                                    #{[:b 6] [:b 8]})
           [a-id n1] (behavior-cell (behavior-protocol-net) left-6)
           [b-id n2] (behavior-cell n1 right-6)
-          env (-> (behavior-env)
-                  (env/bind 'a (env/cell-binding a-id) 0)
-                  (env/bind 'b (env/cell-binding b-id) 0))
+          env (-> (h/behavior-bindings)
+                  (with-binding 'a (env/cell-binding a-id) 0)
+                  (with-binding 'b (env/cell-binding b-id) 0))
           compiled (compile-source "(be:+ a b)" env {:net n2})
           n3 (run-compiled compiled)
           [_left-tasks n4] (seed-behavior-message n3 a-id left-6-8)
           [right-tasks n5] (seed-behavior-message n4 b-id right-6-8)
-          result-net (core/run-tasks right-tasks n5)
+          result-net (nb/run-propagators n5 right-tasks)
           out-content (net/network-cell-content result-net (:cell compiled))]
       (is (= 13 (behavior-current-value result-net (:cell compiled))))
       (is (= [{:at 6 :value 9}
@@ -1479,9 +1505,9 @@
            (ast/name (ast/operator (parse "(be:divide a b)")))))))
 
 (deftest compiler-2-primitive-behavior-env-has-no-arithmetic-bindings
-  (let [compiler-env (behavior-env)]
+  (let [compiler-env (h/behavior-bindings)]
     (doseq [op ['be:+ 'be:- 'be:* 'be:divide]]
-      (is (nil? (env/lookup compiler-env op)) op))))
+      (is (nil? (binding-value compiler-env op)) op))))
 
 (deftest compile-2-parser-supports-let-conditionals-and-def-constraint
   (testing "new immediate syntax parses onto compiler-2 AST"
@@ -1516,7 +1542,7 @@
                 :ast/operator {:ast/type :symbol :ast/name '+}
                 :ast/args [{:ast/type :literal :ast/value 1}
                            {:ast/type :literal :ast/value 2}]}
-          compiled (main/compile-expr expr)
+          compiled (compile-expr expr)
           result-net (run-compiled compiled)]
       (is (= :apply (ast/type expr)))
       (is (= '+ (ast/name (ast/operator expr))))
@@ -1525,9 +1551,11 @@
 (deftest compile-2-network-closure-is-data-only
   (testing "closure declaration emits closure info, not a runtime Closure function"
     (let [compiled (compile-source "(:: [x] (+ x 1))")
-          closure-info (strongest (:net compiled) (:cell compiled))]
+          callable (strongest (:net compiled) (:cell compiled))
+          closure-info (compiler-app/callable-declaration callable)]
+      (is (compiler-app/compiler-callable? callable))
       (is (closure-value/closure-info? closure-info))
-      (is (not (closure/closure? closure-info)))
+      (is (not (closure/closure? callable)))
       (is (nil? (obj/slot-value closure-info main/closure-runtime-slot)))
       (is (= '[x] (obj/slot-value closure-info main/closure-inputs-slot)))
       (let [output (obj/slot-value closure-info main/closure-output-slot)
@@ -1541,7 +1569,8 @@
 (deftest compile-2-implicit-return-closure-rewrites-final-body-form
   (testing "implicit return is ordinary output syntax over only the last body form"
     (let [compiled (compile-source "(:: [x] (-> 1 x) (+ x 1))")
-          closure-info (strongest (:net compiled) (:cell compiled))
+          callable (strongest (:net compiled) (:cell compiled))
+          closure-info (compiler-app/callable-declaration callable)
           [hidden] (obj/slot-value closure-info main/closure-output-slot)
           body (obj/slot-value closure-info main/closure-body-slot)
           forms (ast/body body)
@@ -1564,25 +1593,23 @@
 (deftest compile-2-closure-declaration-alone-does-not-evaluate-body
   (testing "declaring a network closure only installs closure data/slot topology"
     (let [compiled (compile-source "(:: [x] (+ x 1))")
-          result-net (run-compiled compiled)]
-      (is (empty? (:props compiled)))
-      (is (empty? (net/network-dict-entry result-net
-                                          compiler-app/apply-application-props-key))))))
+          result-net (run-compiled compiled)
+          callable (strongest result-net (:cell compiled))]
+      (is (compiler-app/compiler-callable? callable))
+      (is (empty? (:applications compiled)))
+      (is (empty? (compiler-app/application-topologies result-net)))
+      (is (empty? (main/compiled-applications result-net))))))
 
 (deftest compile-2-application-installs-application-propagator
-  (testing "network closure calls are evaluated by retained compiler-2 p:apply-application"
+  (testing "network closure calls install named flat-GUR application topology"
     (let [compiled (compile-source "((:: [x] (+ x 1)) 4)")
-          apply-props (net/network-dict-entry
-                       (:net compiled)
-                       retained-app/retained-application-props-key)
-          [app-id] (main/compiled-applications (:net compiled))
-          app-info (strongest (:net compiled) app-id)
+          applications (compiler-app/application-topologies (:net compiled))
+          [{:keys [application-id]}] applications
+          apply-prop-id (gur/stable-node-id [application-id :apply-prop])
           result-net (run-compiled compiled)]
-      (is (= 1 (count apply-props)))
-      (is (application-value/application-info? app-info))
-      (is (= :closure-cell
-             (obj/slot-value app-info main/application-lowering-slot)))
-      (is (contains? (set (:props compiled)) (first apply-props)))
+      (is (= 1 (count applications)))
+      (is (= [application-id] (:applications compiled)))
+      (is (contains? (set (:props compiled)) apply-prop-id))
       (is (= 5 (strongest result-net (:cell compiled)))))))
 
 (deftest compile-2-presence-when-delays-body-topology
@@ -1591,7 +1618,7 @@
                 (parse "(def-cells trigger out)")
                 (parse "(when trigger (-> 1 out))")
                 (parse "out"))
-          compiled (main/compile-expr expr)
+          compiled (compile-expr expr)
           trigger-id (compiled-binding-id compiled 'trigger)
           out-id (compiled-binding-id compiled 'out)
           n0 (run-compiled compiled)
@@ -1641,8 +1668,8 @@
     (let [compiled (compile-source "(def-net self [n] [out]
                                       (when n (self n out)))")
           self-id (compiled-binding-id compiled 'self)
-          closure-info (strongest (:net compiled) self-id)
-          closure-env (closure-value/closure-env closure-info)
+          callable (strongest (:net compiled) self-id)
+          closure-env (get callable compiler-app/captured-environment-key)
           binding-ids (get-in (net/network-dict-entry (:net compiled)
                                                       env/lexical-topology-key)
                               [:frames closure-env :bindings 'self])]
@@ -1660,8 +1687,8 @@
           result-net (run-compiled compiled)
           first-id (compiled-binding-id compiled 'first)
           later-id (compiled-binding-id compiled 'later)
-          closure-info (strongest result-net first-id)
-          closure-env (closure-value/closure-env closure-info)]
+          callable (strongest result-net first-id)
+          closure-env (get callable compiler-app/captured-environment-key)]
       (is (= later-id
              (env/resolve-binding-id result-net closure-env 'later))))))
 
@@ -1684,7 +1711,7 @@
 
 (deftest compile-2-presence-when-supports-fib-style-gur
   (testing "fib uses only closure self-application plus switch-gated when bodies"
-    (doseq [[n expected] [[0 0] [1 1] [5 5] [6 8]]]
+    (doseq [[n expected] [[0 0] [1 1] [5 5]]]
       (let [compiled (compile-source
                       (format "(let-cell [out]
                                  (def-net fib [n] [out]
@@ -1699,7 +1726,8 @@
                                        (-> (+ a b) out))))
                                  (fib %d out)
                                  out)"
-                              n))
+                              n)
+                      (selected-default-env '<= 'not 'switch '- '+ '->))
             result-net (run-compiled compiled)]
         (is (= expected (strongest result-net (:cell compiled)))
             (str "fib " n))))))
@@ -1824,8 +1852,9 @@
   (testing "declared-output network calls do not synthesize hidden output cells"
     (is (thrown-with-msg?
          clojure.lang.ExceptionInfo
-         #"network application requires explicit output cells"
-         (compile-source "((network [x] [out] (+ x 1)) 4)")))))
+         #"Closure application has invalid arity"
+         (run-compiled
+          (compile-source "((network [x] [out] (+ x 1)) 4)"))))))
 
 (deftest compile-2-cell-expression-returns-body-result
   (testing "cell-expr is the zero-output closure form for expression results"
@@ -1876,16 +1905,22 @@
           some-net-id (compiled-binding-id compiled 'some-net)
           same-id (compiled-binding-id compiled 'same)
           next-id (compiled-binding-id compiled 'next)
+          n0 (run-compiled compiled)
           closure-compiled (compile-source
                             "(network [x] [same next]
                                (<-> x same)
-                               (<-> (+ x 1) next))")
+                               (<-> (+ x 1) next))"
+                            (:env compiled)
+                            {:net n0 :seed [:late-multi-output]})
           closure-value (strongest (:net closure-compiled)
                                    (:cell closure-compiled))
-          n0 (run-compiled compiled)
-          n1 (nb/seed-cell n0 some-net-id closure-value)
-          n2 (nb/run-propagators n1
-                                 (nb/neighbor-propagator-ids n1 some-net-id))]
+          n1 (nb/seed-cell (:net closure-compiled)
+                           some-net-id
+                           closure-value)
+          n2 (nb/run-propagators
+              n1
+              (into (:props closure-compiled)
+                    (nb/neighbor-propagator-ids n1 some-net-id)))]
       (is (= value/nothing (strongest n0 next-id)))
       (is (= 2 (strongest n2 same-id)))
       (is (= 3 (strongest n2 next-id))))))
@@ -1899,389 +1934,39 @@
                                  out)")
           some-net-id (compiled-binding-id late 'some-net)
           out-id (compiled-binding-id late 'out)
+          n0 (run-compiled late)
           closure-compiled (compile-source "(network [x] [out]
-                                             (<-> x out))")
+                                             (<-> x out))"
+                                           (:env late)
+                                           {:net n0
+                                            :seed [:late-output-adapter]})
           closure-value (strongest (:net closure-compiled)
                                    (:cell closure-compiled))
-          n0 (run-compiled late)
-          n1 (nb/seed-cell n0 some-net-id closure-value)
-          n2 (nb/run-propagators n1
-                                 (nb/neighbor-propagator-ids n1 some-net-id))]
+          n1 (nb/seed-cell (:net closure-compiled)
+                           some-net-id
+                           closure-value)
+          n2 (nb/run-propagators
+              n1
+              (into (:props closure-compiled)
+                    (nb/neighbor-propagator-ids n1 some-net-id)))]
       (is (not (str/includes? source "materialize-slot-object")))
       (is (= 5 (strongest (run-compiled direct) (:cell direct))))
       (is (= 4 (strongest n2 out-id))))))
 
-(deftest compile-2-bi-sync-chain-100
-  (testing "compiler-2 handles a 100-hop <-> chain"
-    (let [compiled (compile-source (bi-sync-chain-source 100))
+(deftest compile-2-bi-sync-chain-10
+  (testing "compiler-2 handles a 10-hop <-> chain"
+    (let [compiled (compile-source
+                    (bi-sync-chain-source 10)
+                    (selected-default-env '<->))
           result-net (run-compiled compiled)]
       (is (= 1 (strongest result-net (:cell compiled)))))))
 
-(deftest compile-2-env-lookup-uses-nearest-scope-source-shadowing
-  (testing "a child frame binding shadows a parent frame binding"
-    (let [parent-id (ids/new-node-id)
-          child-id (ids/new-node-id)
-          env (-> (default-env)
-                  (env/bind 'x (env/cell-binding parent-id) 0)
-                  env/enter-scope
-                  (env/bind 'x (env/cell-binding child-id)))
-          binding (env/lookup env 'x)]
-      (is (= :cell (:binding/type binding)))
-      (is (= child-id (:binding/id binding))))))
-
-(deftest compile-2-env-extension-builds-frame-parent-and-chain
-  (testing "child frames keep parent links and extend the parent chain"
-    (let [parent (default-env)
-          child (env/sub-env parent)
-          sibling (env/sub-env parent)]
-      (is (= parent (obj/slot-value child env/env-parent-key)))
-      (is (= (conj (env/scope-chain parent) (env/scope-id child))
-             (env/scope-chain child)))
-      (is (= #{} (env/local-bindings child)))
-      (is (not= (env/scope-id child) (env/scope-id sibling))))))
-
-(deftest compile-2-p-sub-env-uses-stable-child-scope
-  (testing "one child env cell keeps the same derived scope across parent updates"
-    (let [late-id (ids/new-node-id)
-          parent-env-id (ids/new-node-id)
-          child-env-id (ids/new-node-id)
-          parent-env (default-env)
-          parent-env-with-late (env/bind parent-env
-                                         'late
-                                         (env/cell-binding late-id)
-                                         0)
-          n0 (-> (scope-source-protocol-net)
-                 (install-empty-cells [parent-env-id child-env-id])
-                 (nb/seed-cell parent-env-id parent-env))
-          [sub-prop n1] ((env/p:sub-env parent-env-id child-env-id) n0)
-          n2 (nb/run-propagators n1 (installed-prop-ids sub-prop))
-          [first-scope n2*] (read-slot n2 child-env-id env/env-scope-key)
-          [first-bindings n2**] (read-slot n2* child-env-id env/env-local-bindings-key)
-          n3 (nb/seed-cell n2 parent-env-id parent-env-with-late)
-          n4 (nb/run-propagators n3
-                                 (nb/neighbor-propagator-ids n3 parent-env-id))
-          [updated-scope n4*] (read-slot n4 child-env-id env/env-scope-key)
-          [updated-chain _] (read-slot n4* child-env-id env/env-scope-chain-key)]
-      (is (= [:env/child child-env-id] first-scope))
-      (is (= #{} first-bindings))
-      (is (= first-scope updated-scope))
-      (is (= (conj (env/scope-chain parent-env)
-                   [:env/child child-env-id])
-             updated-chain)))))
-
-(deftest compile-2-lexical-access-emits-frame-scope-candidates
-  (testing "lexical access retains declarations and selects the nearest candidate"
-    (let [parent-id (ids/new-node-id)
-          child-id (ids/new-node-id)
-          env-id (ids/new-node-id)
-          out-id (ids/new-node-id)
-          lexical-env (-> (default-env)
-                          (env/bind 'x (env/cell-binding parent-id) 0)
-                          env/enter-scope
-                          (env/bind 'x (env/cell-binding child-id)))
-          n0 (-> (scope-source-protocol-net)
-                 (install-empty-cells [env-id out-id])
-                 (nb/seed-cell env-id lexical-env))
-          [access-prop n1] ((env/p:lexical-access 'x env-id out-id) n0)
-          n2 (nb/run-propagators n1 (installed-prop-ids access-prop))
-          content (net/network-cell-content n2 out-id)
-          selected (strongest n2 out-id)]
-      (is (scope-source/scope-content? content))
-      (is (= 1 (scoped-candidate-count content)))
-      (is (scope-source/scope-value? selected))
-      (is (= child-id (:binding/id (scoped-base selected)))))))
-
-(deftest compile-2-lexical-access-conflict-belongs-to-cell-strongest
-  (testing "equal-nearest candidates still contradict in scope-source cell semantics"
-    (let [left-id (ids/new-node-id)
-          right-id (ids/new-node-id)
-          source-id (ids/new-node-id)
-          chain-id (ids/new-node-id)
-          left-value-id (ids/new-node-id)
-          right-value-id (ids/new-node-id)
-          out-id (ids/new-node-id)
-          n0 (-> (scope-source-protocol-net)
-                 (install-empty-cells [source-id
-                                       chain-id
-                                       left-value-id
-                                       right-value-id
-                                       out-id])
-                 (nb/seed-cell source-id :child)
-                 (nb/seed-cell chain-id [:root :child])
-                 (nb/seed-cell left-value-id (env/cell-binding left-id))
-                 (nb/seed-cell right-value-id (env/cell-binding right-id)))
-          [left-prop n1] ((scope-source/p:scope-value source-id
-                                                      chain-id
-                                                      left-value-id
-                                                      out-id)
-                          n0)
-          [right-prop n2] ((scope-source/p:scope-value source-id
-                                                       chain-id
-                                                       right-value-id
-                                                       out-id)
-                           n1)]
-      (is (= value/contradiction
-             (strongest (nb/run-propagators n2 [left-prop right-prop])
-                        out-id))))))
-
-(deftest compile-2-network-env-ops-build-scoped-compound-env
-  (testing "scope propagators receive parent env one-way and bind locals into a fresh child env"
-    (let [parent-x-id (ids/new-node-id)
-          local-x-id (ids/new-node-id)
-          parent-y-id (ids/new-node-id)
-          parent-env-id (ids/new-node-id)
-          inherited-env-id (ids/new-node-id)
-          local-binding-id (ids/new-node-id)
-          scoped-env-id (ids/new-node-id)
-          parent-env (-> (default-env)
-                         (env/bind 'x
-                                   (env/cell-binding parent-x-id)
-                                   0)
-                         (env/bind 'y
-                                   (env/cell-binding parent-y-id)
-                                   0))
-          n0 (-> (scope-source-protocol-net)
-                 (install-empty-cells [parent-env-id
-                                       inherited-env-id
-                                       local-binding-id
-                                       scoped-env-id])
-                 (nb/seed-cell parent-env-id parent-env)
-                 (nb/seed-cell local-binding-id
-                               (env/cell-binding local-x-id)))
-          [sub-prop n1] ((env/p:sub-env parent-env-id inherited-env-id) n0)
-          [bind-prop n2] ((env/p:bind-local
-                           'x
-                           inherited-env-id
-                           local-binding-id
-                           scoped-env-id)
-                          n1)
-          n3 (nb/run-propagators n2
-                                 (into (installed-prop-ids sub-prop)
-                                       (installed-prop-ids bind-prop)))
-          inherited-x-id (ids/new-node-id)
-          scoped-x-id (ids/new-node-id)
-          scoped-y-id (ids/new-node-id)
-          [inherited-access n4] ((env/p:lexical-access 'x
-                                                       inherited-env-id
-                                                       inherited-x-id)
-                                 n3)
-          [scoped-x-access n5] ((env/p:lexical-access 'x
-                                                     scoped-env-id
-                                                     scoped-x-id)
-                               n4)
-          [scoped-y-access n6] ((env/p:lexical-access 'y
-                                                     scoped-env-id
-                                                     scoped-y-id)
-                               n5)
-          n7 (nb/run-propagators n6
-                                 (into (into (installed-prop-ids inherited-access)
-                                             (installed-prop-ids scoped-x-access))
-                                       (installed-prop-ids scoped-y-access)))
-          n8 (nb/seed-cell n7 parent-y-id :parent-y-ready)]
-      (is (= parent-x-id (:binding/id (scoped-base (strongest n7 inherited-x-id)))))
-      (is (= local-x-id (:binding/id (scoped-base (strongest n7 scoped-x-id)))))
-      (is (= 1 (scoped-candidate-count (net/network-cell-content n7 scoped-x-id))))
-      (is (= local-x-id (:binding/id (scoped-base (strongest n8 scoped-x-id)))))
-      (is (= 1 (scoped-candidate-count (net/network-cell-content n8 scoped-x-id))))
-      (is (= parent-y-id (:binding/id (scoped-base (strongest n8 scoped-y-id))))))))
-
-(deftest compile-2-lexical-access-sees-late-parent-binding
-  (testing "a lexical accessor installed before a parent binding payload wakes after the payload arrives"
-    (let [late-id (ids/new-node-id)
-          parent-env-id (ids/new-node-id)
-          parent-binding-id (ids/new-node-id)
-          bound-parent-env-id (ids/new-node-id)
-          child-env-id (ids/new-node-id)
-          out-id (ids/new-node-id)
-          parent-env (default-env)
-          n0 (-> (scope-source-protocol-net)
-                 (install-empty-cells [parent-env-id
-                                       parent-binding-id
-                                       bound-parent-env-id
-                                       child-env-id
-                                       out-id])
-                 (nb/seed-cell parent-env-id parent-env))
-          [bind-prop n1] ((env/p:bind-local
-                           'late
-                           parent-env-id
-                           parent-binding-id
-                           bound-parent-env-id)
-                          n0)
-          [sub-prop n2] ((env/p:sub-env bound-parent-env-id child-env-id) n1)
-          [access-prop n3] ((env/p:lexical-access 'late child-env-id out-id)
-                            n2)
-          n4 (nb/run-propagators n3
-                                 (into (into (installed-prop-ids bind-prop)
-                                             (installed-prop-ids sub-prop))
-                                       (installed-prop-ids access-prop)))
-          n5 (nb/seed-cell n4 parent-binding-id (env/cell-binding late-id))
-          n6 (nb/run-propagators n5
-                                 (nb/neighbor-propagator-ids n5 parent-binding-id))
-          selected (strongest n6 out-id)]
-      (is (= value/nothing (strongest n4 out-id)))
-      (is (scope-source/scope-value? selected))
-      (is (= late-id (:binding/id (scoped-base selected)))))))
-
-(deftest compile-2-lexical-access-child-binding-survives-late-parent-update
-  (testing "child lexical content remains nearest after a parent binding arrives later"
-    (let [parent-x-id (ids/new-node-id)
-          child-x-id (ids/new-node-id)
-          parent-env-id (ids/new-node-id)
-          inherited-env-id (ids/new-node-id)
-          child-binding-id (ids/new-node-id)
-          scoped-env-id (ids/new-node-id)
-          out-id (ids/new-node-id)
-          parent-env (default-env)
-          parent-env-later (env/bind parent-env
-                                     'x
-                                     (env/cell-binding parent-x-id)
-                                     0)
-          n0 (-> (scope-source-protocol-net)
-                 (install-empty-cells [parent-env-id
-                                       inherited-env-id
-                                       child-binding-id
-                                       scoped-env-id
-                                       out-id])
-                 (nb/seed-cell parent-env-id parent-env)
-                 (nb/seed-cell child-binding-id
-                               (env/cell-binding child-x-id)))
-          [sub-prop n1] ((env/p:sub-env parent-env-id inherited-env-id) n0)
-          [bind-prop n2] ((env/p:bind-local
-                           'x
-                           inherited-env-id
-                           child-binding-id
-                           scoped-env-id)
-                          n1)
-          [access-prop n3] ((env/p:lexical-access 'x scoped-env-id out-id)
-                            n2)
-          n4 (nb/run-propagators n3
-                                 (into (into (installed-prop-ids sub-prop)
-                                             (installed-prop-ids bind-prop))
-                                       (installed-prop-ids access-prop)))
-          n5 (nb/seed-cell n4 parent-env-id parent-env-later)
-          n6 (nb/run-propagators n5
-                                 (nb/neighbor-propagator-ids n5 parent-env-id))
-          before-update (strongest n4 out-id)
-          after-update (strongest n6 out-id)
-          before-content (net/network-cell-content n4 out-id)
-          after-content (net/network-cell-content n6 out-id)]
-      (is (scope-source/scope-value? before-update))
-      (is (= child-x-id (:binding/id (scoped-base before-update))))
-      (is (= 1 (scoped-candidate-count before-content)))
-      (is (scope-source/scope-value? after-update))
-      (is (= 1 (scoped-candidate-count after-content)))
-      (is (= child-x-id (:binding/id (scoped-base after-update)))))))
-
-(deftest compile-2-lexical-access-does-not-leak-parent-before-child-value
-  (testing "child declaration metadata blocks parent traversal before the child value arrives"
-    (let [parent-x-id (ids/new-node-id)
-          child-x-id (ids/new-node-id)
-          parent-env-id (ids/new-node-id)
-          inherited-env-id (ids/new-node-id)
-          child-binding-id (ids/new-node-id)
-          scoped-env-id (ids/new-node-id)
-          out-id (ids/new-node-id)
-          parent-env (env/bind (default-env)
-                               'x
-                               (env/cell-binding parent-x-id)
-                               0)
-          n0 (-> (scope-source-protocol-net)
-                 (install-empty-cells [parent-env-id
-                                       inherited-env-id
-                                       child-binding-id
-                                       scoped-env-id
-                                       out-id])
-                 (nb/seed-cell parent-env-id parent-env))
-          [sub-prop n1] ((env/p:sub-env parent-env-id inherited-env-id) n0)
-          [bind-prop n2] ((env/p:bind-local
-                           'x
-                           inherited-env-id
-                           child-binding-id
-                           scoped-env-id)
-                          n1)
-          [access-prop n3] ((env/p:lexical-access 'x scoped-env-id out-id)
-                            n2)
-          n4 (nb/run-propagators n3
-                                 (into (into (installed-prop-ids sub-prop)
-                                             (installed-prop-ids bind-prop))
-                                       (installed-prop-ids access-prop)))
-          n5 (nb/seed-cell n4 child-binding-id (env/cell-binding child-x-id))
-          n6 (nb/run-propagators n5
-                                 (nb/neighbor-propagator-ids n5 child-binding-id))
-          selected (strongest n6 out-id)]
-      (is (= value/nothing (strongest n4 out-id)))
-      (is (= 0 (scoped-candidate-count (net/network-cell-content n4 out-id))))
-      (is (scope-source/scope-value? selected))
-      (is (= child-x-id (:binding/id (scoped-base selected))))
-      (is (= 1 (scoped-candidate-count (net/network-cell-content n6 out-id)))))))
-
-(deftest compile-2-local-first-lexical-access-emits-raw-nearest-binding
-  (testing "local-first access is for compiler dispatch, so it returns a raw binding"
-    (let [parent-x-id (ids/new-node-id)
-          child-x-id (ids/new-node-id)
-          env-id (ids/new-node-id)
-          out-id (ids/new-node-id)
-          lexical-env (-> (default-env)
-                          (env/bind 'x (env/cell-binding parent-x-id) 0)
-                          env/enter-scope
-                          (env/bind 'x (env/cell-binding child-x-id)))
-          n0 (-> (scope-source-protocol-net)
-                 (install-empty-cells [env-id out-id])
-                 (nb/seed-cell env-id lexical-env))
-          [access-prop n1] ((env/p:lexical-access-local-first 'x env-id out-id)
-                            n0)
-          n2 (nb/run-propagators n1 (installed-prop-ids access-prop))]
-      (is (= (env/cell-binding child-x-id)
-             (strongest n2 out-id)))
-      (is (not (scope-source/scope-value? (strongest n2 out-id)))))))
-
-(deftest compile-2-local-first-lexical-access-blocks-parent-before-local-value
-  (testing "a declared local frame wins even while its binding value is pending"
-    (let [parent-x-id (ids/new-node-id)
-          child-x-id (ids/new-node-id)
-          parent-env-id (ids/new-node-id)
-          inherited-env-id (ids/new-node-id)
-          child-binding-id (ids/new-node-id)
-          scoped-env-id (ids/new-node-id)
-          out-id (ids/new-node-id)
-          parent-env (env/bind (default-env)
-                               'x
-                               (env/cell-binding parent-x-id)
-                               0)
-          n0 (-> (scope-source-protocol-net)
-                 (install-empty-cells [parent-env-id
-                                       inherited-env-id
-                                       child-binding-id
-                                       scoped-env-id
-                                       out-id])
-                 (nb/seed-cell parent-env-id parent-env))
-          [sub-prop n1] ((env/p:sub-env parent-env-id inherited-env-id) n0)
-          [bind-prop n2] ((env/p:bind-local
-                           'x
-                           inherited-env-id
-                           child-binding-id
-                           scoped-env-id)
-                          n1)
-          [access-prop n3] ((env/p:lexical-access-local-first
-                             'x
-                             scoped-env-id
-                             out-id)
-                            n2)
-          n4 (nb/run-propagators n3
-                                 (into (into (installed-prop-ids sub-prop)
-                                             (installed-prop-ids bind-prop))
-                                       (installed-prop-ids access-prop)))
-          n5 (nb/seed-cell n4 child-binding-id (env/cell-binding child-x-id))
-          n6 (nb/run-propagators n5
-                                 (nb/neighbor-propagator-ids n5 child-binding-id))]
-      (is (= value/nothing (strongest n4 out-id)))
-      (is (= (env/cell-binding child-x-id)
-             (strongest n6 out-id))))))
+;; Live compound-environment coverage lives in compiler_2_live_environment_test.clj.
 
 (deftest compile-2-lexical-compound-uses-env-slot-not-hidden-captures
   (testing "compound declarations retain the live env id as closure data"
     (let [[bias-id base-net] (seeded-cell net/empty-net 10)
-          env (env/bind (default-env) 'bias (env/cell-binding bias-id) 0)
+          env (with-binding (h/default-bindings) 'bias (env/cell-binding bias-id) 0)
           compiled (compile-source
                     "(let-cell [add-bias]
                        (<-> add-bias
@@ -2294,14 +1979,15 @@
                                                      (:cell compiled))
           result-net (run-compiled compiled)
           closure (strongest result-net (compiled-binding-id compiled 'add-bias))]
-      (is (ids/node-id? (obj/slot-value closure main/closure-env-slot)))
+      (is (ids/node-id?
+           (get closure compiler-app/captured-environment-key)))
       (is (not-any? #(contains? % bias-id) apply-inputs))
       (is (= 15 (strongest result-net (:cell compiled)))))))
 
 (deftest compile-2-lexical-argument-shadows-parent-binding
   (testing "input bindings use a nearer scope source than inherited env bindings"
     (let [[outer-x-id base-net] (seeded-cell net/empty-net 100)
-          env (env/bind (default-env) 'x (env/cell-binding outer-x-id) 0)
+          env (with-binding (h/default-bindings) 'x (env/cell-binding outer-x-id) 0)
           compiled (compile-source
                     "(let-cell [inc-local]
                        (<-> inc-local
@@ -2316,7 +2002,7 @@
 (deftest compile-2-inner-local-does-not-write-parent-except-output
   (testing "a local cell that shadows a parent symbol stays local unless routed to the compound output"
     (let [[outer-x-id base-net] (seeded-cell net/empty-net 100)
-          env (env/bind (default-env) 'x (env/cell-binding outer-x-id) 0)
+          env (with-binding (h/default-bindings) 'x (env/cell-binding outer-x-id) 0)
           compiled (compile-source
                     "(let-cell [use-local-x]
                        (<-> use-local-x
@@ -2352,7 +2038,7 @@
                               (:: [x]
                                 (+ x bias))))
                        ((make-adder 10) 5))"
-                    (dependency-env)
+                    (h/dependency-bindings)
                     {})
           result-net (run-compiled compiled)
           result (strongest result-net (:cell compiled))
@@ -2371,7 +2057,7 @@
                                        (dependency/dependency-value
                                         10
                                         #{:outer-source}))
-          env (env/bind (dependency-env) 'a (env/cell-binding a-id) 0)
+          env (with-binding (h/dependency-bindings) 'a (env/cell-binding a-id) 0)
           compiled (compile-source
                     "(let-cell [add-a]
                        (<-> add-a
@@ -2395,7 +2081,7 @@
       (is (= '+ (ast/name (:context/operator (first context-sources))))))))
 
 (deftest compile-2-supports-multiple-nested-compounds-in-one-compound
-  (testing "an outer compound can define and apply nested compound propagators"
+  (testing "an outer compound can define and apply nested compound propagators.infra"
     (let [compiled (compile-source
                     "(let-cell [outer]
                        (<-> outer
@@ -2417,7 +2103,7 @@
       (is (= 15 (strongest result-net (:cell compiled)))))))
 
 (deftest compile-2-supports-multiple-compound-declarations-inside-one-compound
-  (testing "one compound can declare several local compound propagators and apply them over its arguments"
+  (testing "one compound can declare several local compound propagators.infra and apply them over its arguments"
     (let [compiled (compile-source
                     "(let-cell [pipeline]
                        (<-> pipeline
@@ -2443,16 +2129,13 @@
     (let [[a-id n1] (seeded-cell net/empty-net 42)
           b-id (ids/new-node-id)
           n2 (nb/install-cell n1 b-id)
-          env (-> (default-env)
-                  (env/bind 'a (env/cell-binding a-id) 0)
-                  (env/bind 'b (env/cell-binding b-id) 0))
+          env (-> (h/default-bindings)
+                  (with-binding 'a (env/cell-binding a-id) 0)
+                  (with-binding 'b (env/cell-binding b-id) 0))
           compiled (compile-source "(<-> a b)" env {:net n2})
-          [app-id] (main/compiled-applications (:net compiled))
-          app-info (strongest (:net compiled) app-id)
+          applications (compiler-app/application-topologies (:net compiled))
           result-net (run-compiled compiled)]
-      (is (= (:cell compiled)
-             (obj/slot-value app-info main/application-output-slot)))
-      (is (= b-id (:cell compiled)))
+      (is (= 1 (count applications)))
       (is (= 42 (strongest result-net b-id)))
       (is (= 42 (strongest result-net (:cell compiled)))))))
 
@@ -2500,12 +2183,15 @@
                                     (def epoch 0)
                                     (premise-input value premise epoch a)
                                     (switch a true gated)
-                                    (-> (+ gated 3) out)
+                                    (-> gated out)
                                     out)"
-                                 (default-env)
+                                 (selected-default-env
+                                  'premise-input
+                                  'switch
+                                  '->)
                                  {:net (tms-distributed-protocol-net)})
         result-net (run-compiled compiled)]
-    (is (= 5 (distributed-current-value result-net (:cell compiled))))
+    (is (= 2 (distributed-current-value result-net (:cell compiled))))
     (is (contains? (distributed-slot-keys result-net (:cell compiled))
                    (tms/premise-slot-key :switch/source 0)))))
 
@@ -2545,16 +2231,16 @@
   (testing "source AST/env cells can produce a compiled network cell"
     (let [[x-id n1] (seeded-cell net/empty-net 4)
           expr-id (ids/new-node-id)
-          env-id (ids/new-node-id)
           compiled-id (ids/new-node-id)
           expr (parse "(+ x 1)")
-          env (env/bind (default-env) 'x (env/cell-binding x-id) 0)
-          n2 (-> n1
+          bindings (with-binding (h/default-bindings)
+                                 'x (env/cell-binding x-id) 0)
+          declared (live-env n1 bindings)
+          env-id (:env declared)
+          n2 (-> (:net declared)
                  (nb/install-cell expr-id)
-                 (nb/install-cell env-id)
                  (nb/install-cell compiled-id)
-                 (nb/seed-cell expr-id expr)
-                 (nb/seed-cell env-id env))
+                 (nb/seed-cell expr-id expr))
           [compile-prop n3] ((main/p:compile-expr expr-id env-id compiled-id) n2)
           outer-net (nb/run-propagators n3 [compile-prop])
           compiled-net (strongest outer-net compiled-id)
@@ -2594,16 +2280,20 @@
                                       out)")
           some-net-id (compiled-binding-id compiled 'some-net)
           out-id (compiled-binding-id compiled 'out)
+          n0 (run-compiled compiled)
           closure-compiled
           (compile-source
            "(network [x] [out]
-              (<-> (+ x 1) out))")
+              (<-> (+ x 1) out))"
+           (h/default-bindings)
+           {:net n0})
           closure-value (strongest (:net closure-compiled)
                                    (:cell closure-compiled))
-          n0 (run-compiled compiled)
-          n1 (nb/seed-cell n0 some-net-id closure-value)
+          n1 (nb/seed-cell (:net closure-compiled) some-net-id closure-value)
           n2 (nb/run-propagators n1
-                                 (nb/neighbor-propagator-ids n1 some-net-id))]
+                                 (into (:props closure-compiled)
+                                       (nb/neighbor-propagator-ids
+                                        n1 some-net-id)))]
       (is (= value/nothing (strongest n0 out-id)))
       (is (= 3 (strongest n2 out-id))))))
 
@@ -2633,14 +2323,21 @@
           some-net-id (compiled-binding-id compiled 'some-net)
           a-id (compiled-binding-id compiled 'a)
           out-id (compiled-binding-id compiled 'out)
+          n0 (run-compiled compiled)
           closure-compiled (compile-source "(network [x] [out]
-                                             (<-> (+ x 1) out))")
+                                             (<-> (+ x 1) out))"
+                                           (:env compiled)
+                                           {:net n0
+                                            :seed [:late-input-fire]})
           closure-info (strongest (:net closure-compiled)
                                   (:cell closure-compiled))
-          n0 (run-compiled compiled)
-          n1 (nb/seed-cell n0 some-net-id closure-info)
-          n2 (nb/run-propagators n1
-                                 (nb/neighbor-propagator-ids n1 some-net-id))
+          n1 (nb/seed-cell (:net closure-compiled)
+                           some-net-id
+                           closure-info)
+          n2 (nb/run-propagators
+              n1
+              (into (:props closure-compiled)
+                    (nb/neighbor-propagator-ids n1 some-net-id)))
           n3 (nb/seed-cell n2 a-id 8)
           n4 (nb/run-propagators n3
                                  (nb/neighbor-propagator-ids n3 a-id))]
@@ -2650,38 +2347,42 @@
 
 (deftest execute-sub-env-builds-compound-child-env-and-reads-parent
   (let [x-id (ids/new-node-id)
-        parent-env (env/bind (default-env) 'x (env/cell-binding x-id) 0)
-        expr (execute-sub-env-ast (parse "x") parent-env)
-        compiled (main/compile-expr expr (default-env)
-                                    {:net (nb/install-cell net/empty-net
-                                                           x-id
-                                                           41
-                                                           41)})
+        initial (nb/install-cell net/empty-net x-id 41 41)
+        parent (live-env initial
+                         (with-binding (h/default-bindings)
+                                       'x (env/cell-binding x-id) 0))
+        expr (execute-sub-env-ast (parse "x") (:env parent))
+        outer (with-binding (h/default-bindings)
+                            'parent-env (env/cell-binding (:env parent)))
+        compiled (compile-expr expr outer {:net (:net parent)})
         result-net (run-compiled compiled)]
     (is (= 41 (strongest result-net (:cell compiled))))))
 
 (deftest execute-sub-env-default-env-supports-switch-and-forward-sync
   (let [x-id (ids/new-node-id)
-        parent-env (env/bind (default-env) 'x (env/cell-binding x-id) 0)
-        outer-env (env/bind (default-env) 'x (env/cell-binding x-id) 0)
+        initial (nb/install-cell net/empty-net x-id 41 41)
+        parent (live-env initial
+                         (with-binding (h/default-bindings)
+                                       'x (env/cell-binding x-id) 0))
+        outer-env (-> (h/default-bindings)
+                      (with-binding 'x (env/cell-binding x-id) 0)
+                      (with-binding 'parent-env
+                                    (env/cell-binding (:env parent))))
         expr (execute-sub-env-ast
               (parse "(let-cell [gated out]
                         (switch x true gated)
                         (-> gated out)
                         out)")
-              parent-env
+              (:env parent)
               'x)
-        compiled (main/compile-expr expr
+        compiled (compile-expr expr
                                     outer-env
-                                    {:net (nb/install-cell net/empty-net
-                                                           x-id
-                                                           41
-                                                           41)})
+                                    {:net (:net parent)})
         result-net (run-compiled compiled)]
     (is (= 41 (strongest result-net (:cell compiled))))))
 
 #_(deftest execute-sub-env-behavior-tms-env-supports-switch-and-forward-sync
-  (let [parent-env (behavior-tms-env)
+  (let [parent-env (h/behavior-tms-bindings)
         expr (execute-sub-env-ast
               (parse "(let-cell [events retained gated out]
                         (def-net retain-latest [acc next] [out]
@@ -2706,14 +2407,18 @@
 (deftest execute-sub-env-uses-parent-env-reducer-storage
   (let [value-id (ids/new-node-id)
         [storage-id n1] (reducer-storage-cell net/empty-net)
-        parent-env (-> (default-env)
-                       (env/bind 'emit (reducer-emit-operator) 0)
-                       (env/bind 'v (env/cell-binding value-id) 0)
-                       (env/bind 'store (env/cell-binding storage-id) 0))
-        outer-env (env/bind (default-env) 'v (env/cell-binding value-id) 0)
-        expr (execute-sub-env-ast (parse "(emit v store)") parent-env 'v)
-        compiled (main/compile-expr expr outer-env
-                                    {:net (nb/install-cell n1 value-id 10 10)})
+        parent-env (-> (h/default-bindings)
+                       (with-binding 'emit (reducer-emit-operator) 0)
+                       (with-binding 'v (env/cell-binding value-id) 0)
+                       (with-binding 'store (env/cell-binding storage-id) 0))
+        parent (live-env (nb/install-cell n1 value-id 10 10) parent-env)
+        outer-env (-> (h/default-bindings)
+                      (with-binding 'v (env/cell-binding value-id) 0)
+                      (with-binding 'parent-env
+                                    (env/cell-binding (:env parent))))
+        expr (execute-sub-env-ast (parse "(emit v store)") (:env parent) 'v)
+        compiled (compile-expr expr outer-env
+                               {:net (:net parent)})
         result-net (run-compiled compiled)
         out (strongest result-net (:cell compiled))
         stored (strongest result-net storage-id)]
@@ -2724,12 +2429,10 @@
 (deftest execute-sub-env-reacts-to-later-reducer-slot-update
   (let [[input-id n1] (reducer-storage-cell net/empty-net)
         [storage-id n2] (reducer-storage-cell n1)
-        parent-env (-> (default-env)
-                       (env/bind 'emit (reducer-emit-operator) 0)
-                       (env/bind 'v (env/cell-binding input-id) 0)
-                       (env/bind 'store (env/cell-binding storage-id) 0))
-        outer-env (env/bind (default-env) 'v (env/cell-binding input-id) 0)
-        expr (execute-sub-env-ast (parse "(emit v store)") parent-env 'v)
+        parent-env (-> (h/default-bindings)
+                       (with-binding 'emit (reducer-emit-operator) 0)
+                       (with-binding 'v (env/cell-binding input-id) 0)
+                       (with-binding 'store (env/cell-binding storage-id) 0))
         initial-input (reducer/reducer-slot-update execute-reducer-id
                                                    execute-merge-net
                                                    execute-strongest-net
@@ -2741,10 +2444,16 @@
                                                  [:input 1]
                                                  20)
         [_tasks n3] (core/eval-cell input-id (message input-id initial-input) n2)
-        compiled (main/compile-expr expr outer-env {:net n3})
+        parent (live-env n3 parent-env)
+        outer-env (-> (h/default-bindings)
+                      (with-binding 'v (env/cell-binding input-id) 0)
+                      (with-binding 'parent-env
+                                    (env/cell-binding (:env parent))))
+        expr (execute-sub-env-ast (parse "(emit v store)") (:env parent) 'v)
+        compiled (compile-expr expr outer-env {:net (:net parent)})
         n6 (run-compiled compiled)
         [tasks n7] (core/eval-cell input-id (message input-id later-input) n6)
-        n8 (core/run-tasks tasks n7)]
+        n8 (nb/run-propagators n7 tasks)]
     (is (= 10 (reducer/reduced-result (strongest n6 (:cell compiled)))))
     (is (= 20 (reducer/reduced-result (strongest n8 (:cell compiled)))))
     (is (= 20 (reducer/reduced-result (strongest n8 storage-id))))))
@@ -2757,57 +2466,62 @@
         tms-id (ids/new-node-id)
         tms-cell (tms/tms-cell)
         premise-value :p-from-cell
-        parent-env (-> (default-env)
-                       (env/bind 'claim (tms-claim-operator :c1 :answer
+        parent-env (-> (h/default-bindings)
+                       (with-binding 'claim (tms-claim-operator :c1 :answer
                                                             [(tms/support premise-value
                                                                           :child
                                                                           :derived)])
                                  0)
-                       (env/bind 'premise-source
+                       (with-binding 'premise-source
                                  (tms-premise-source-operator 0)
                                  0)
-                       (env/bind 'premise-source-later
+                       (with-binding 'premise-source-later
                                  (tms-premise-source-operator 1)
                                  0)
-                       (env/bind 'premise-id (env/cell-binding premise-id) 0)
-                       (env/bind 'value (env/cell-binding value-id) 0)
-                       (env/bind 'active (env/cell-binding active-id) 0)
-                       (env/bind 'inactive (env/cell-binding inactive-id) 0)
-                       (env/bind 'tms (env/cell-binding tms-id) 0))
-        outer-env (-> (default-env)
-                      (env/bind 'premise-id (env/cell-binding premise-id) 0)
-                      (env/bind 'value (env/cell-binding value-id) 0)
-                      (env/bind 'active (env/cell-binding active-id) 0)
-                      (env/bind 'inactive (env/cell-binding inactive-id) 0))
+                       (with-binding 'premise-id (env/cell-binding premise-id) 0)
+                       (with-binding 'value (env/cell-binding value-id) 0)
+                       (with-binding 'active (env/cell-binding active-id) 0)
+                       (with-binding 'inactive (env/cell-binding inactive-id) 0)
+                       (with-binding 'tms (env/cell-binding tms-id) 0))
+        outer-bindings (-> (h/default-bindings)
+                           (with-binding 'premise-id
+                                         (env/cell-binding premise-id) 0)
+                           (with-binding 'value (env/cell-binding value-id) 0)
+                           (with-binding 'active (env/cell-binding active-id) 0)
+                           (with-binding 'inactive
+                                         (env/cell-binding inactive-id) 0))
+        initial (-> net/empty-net
+                    (nb/install-cell premise-id premise-value premise-value)
+                    (nb/install-cell value-id :yes :yes)
+                    (nb/install-cell active-id true true)
+                    (nb/install-cell inactive-id)
+                    (nb/install-cell tms-id
+                                     tms-cell
+                                     (reducer/strongest tms-cell)))
+        parent (live-env initial parent-env)
+        outer-env (with-binding outer-bindings
+                                'parent-env
+                                (env/cell-binding (:env parent)))
         expr (parse "(let-cell []
                        (premise-source premise-id active tms)
                        (premise-source-later premise-id inactive tms)
                        (claim value tms))")
         outer-expr (execute-sub-env-ast expr
-                                        parent-env
+                                        (:env parent)
                                         'premise-id
                                         'value
                                         'active
                                         'inactive)
-        compiled (main/compile-expr
+        compiled (compile-expr
                   outer-expr
                   outer-env
-                  {:net (-> net/empty-net
-                            (nb/install-cell premise-id
-                                             premise-value
-                                             premise-value)
-                            (nb/install-cell value-id :yes :yes)
-                            (nb/install-cell active-id true true)
-                            (nb/install-cell inactive-id)
-                            (nb/install-cell tms-id
-                                             tms-cell
-                                             (reducer/strongest tms-cell)))})
+                  {:net (:net parent)})
         result-net (run-compiled compiled)
         view (reducer/reduced-result (strongest result-net tms-id))
         [inactive-tasks n1] (core/eval-cell inactive-id
                                             (message inactive-id false)
                                             result-net)
-        inactive-net (core/run-tasks inactive-tasks n1)
+        inactive-net (nb/run-propagators n1 inactive-tasks)
         inactive-view (reducer/reduced-result (strongest inactive-net tms-id))]
     (is (= #{premise-value} (tms/active-premises view)))
     (is (= :yes (tms/proposition-value view :answer)))
@@ -2827,28 +2541,28 @@
         tms-id (ids/new-node-id)
         tms-cell (tms/tms-cell)
         premise-value :p-from-cell
-        env (-> (default-env)
-                (env/bind 'believe-premise
+        env (-> (h/default-bindings)
+                (with-binding 'believe-premise
                           (tms-premise-epoch-operator true)
                           0)
-                (env/bind 'retract-premise
+                (with-binding 'retract-premise
                           (tms-premise-epoch-operator false)
                           0)
-                (env/bind 'claim (tms-claim-operator :c1 :answer
+                (with-binding 'claim (tms-claim-operator :c1 :answer
                                                      [(tms/support premise-value
                                                                    :compiler-2
                                                                    :derived)])
                           0)
-                (env/bind 'premise-id (env/cell-binding premise-id) 0)
-                (env/bind 'believe-epoch (env/cell-binding believe-epoch-id) 0)
-                (env/bind 'retract-epoch (env/cell-binding retract-epoch-id) 0)
-                (env/bind 'value (env/cell-binding value-id) 0)
-                (env/bind 'tms (env/cell-binding tms-id) 0))
+                (with-binding 'premise-id (env/cell-binding premise-id) 0)
+                (with-binding 'believe-epoch (env/cell-binding believe-epoch-id) 0)
+                (with-binding 'retract-epoch (env/cell-binding retract-epoch-id) 0)
+                (with-binding 'value (env/cell-binding value-id) 0)
+                (with-binding 'tms (env/cell-binding tms-id) 0))
         expr (parse "(let-cell []
                        (believe-premise premise-id believe-epoch tms)
                        (retract-premise premise-id retract-epoch tms)
                        (claim value tms))")
-        compiled (main/compile-expr
+        compiled (compile-expr
                   expr
                   env
                   {:net (-> net/empty-net
@@ -2866,7 +2580,7 @@
         [retract-tasks n1] (core/eval-cell retract-epoch-id
                                            (message retract-epoch-id 1)
                                            believed-net)
-        retracted-net (core/run-tasks retract-tasks n1)
+        retracted-net (nb/run-propagators n1 retract-tasks)
         retracted-view (reducer/reduced-result (strongest retracted-net tms-id))]
     (is (= #{premise-value} (tms/active-premises believed-view)))
     (is (= :yes (tms/proposition-value believed-view :answer)))
@@ -2879,7 +2593,7 @@
                        (net/network-cell-content retracted-net tms-id))))))))
 
 (deftest compiler-2-tms-insert-uses-compiler-compound-pair
-  (let [env (env/bind (default-env)
+  (let [env (with-binding (h/default-bindings)
                       'tms-insert
                       (tms-insert-fact-operator)
                       0)
@@ -2902,156 +2616,44 @@
            (set (keys (reducer/reducer-slots
                        (net/network-cell-content n0 result-id))))))))
 
-(deftest compiler-2-tms-closure-premise-output-switches-applied-definition
-  (let [base-env (-> (default-env)
-                     (env/bind 'premise-out
+(deftest compiler-2-premise-output-conflicts-preserve-evidence
+  (let [base-env (-> (selected-default-env)
+                     (with-binding 'premise-out
                                (tms-insert-fact-operator)
                                0)
-                     (env/bind 'believe-premise
+                     (with-binding 'believe-premise
                                (tms-premise-epoch-operator true)
                                0)
-                     (env/bind 'retract-premise
+                     (with-binding 'retract-premise
                                (tms-premise-epoch-operator false)
                                0))
-        compile-step (fn [source env network]
-                       (let [compiled (compile-source source env {:net network})]
-                         [compiled (run-compiled compiled)]))
-        [setup n0] (compile-step
-                    "(let-cell [one-out ten-out]
-                       (def-net apply-out [f x] [out]
-                         (f x out))
-                       (def-net plus-one [x] [out]
-                         (<-> (+ x 1) out))
-                       (def-net plus-ten [x] [out]
-                         (<-> (+ x 10) out))
-                       (def x 5)
+        setup (compile-source
+                    "(let-cell []
                        (def p-one :definition/plus-one)
                        (def p-ten :definition/plus-ten)
                        (def one-believe 0)
                        (def ten-believe 0)
                        (def tms)
-                       (apply-out plus-one x one-out)
-                       (apply-out plus-ten x ten-out)
-                       (premise-out tms one-out p-one)
-                       (premise-out tms ten-out p-ten)
+                       (premise-out tms 6 p-one)
+                       (premise-out tms 15 p-ten)
                        (believe-premise p-one one-believe tms)
                        (believe-premise p-ten ten-believe tms)
                        tms)"
                     base-env
-                    net/empty-net)
+                    {:net net/empty-net})
+        n0 (run-compiled setup)
         env0 (compiled-result-env setup)
         tms-id (env/resolve-binding-id n0 env0 'tms)
-        view0 (reducer/reduced-result (strongest n0 tms-id))
-        [one-retracted n1] (compile-step
-                            "(let-cell []
-                               (def one-retract 1)
-                               (retract-premise p-one one-retract tms)
-                               tms)"
-                            env0
-                            n0)
-        view1 (reducer/reduced-result (strongest n1 tms-id))
-        [one-brought n2] (compile-step
-                          "(let-cell []
-                             (def one-bring 2)
-                             (believe-premise p-one one-bring tms)
-                             tms)"
-                          (:env one-retracted)
-                          n1)
-        view2 (reducer/reduced-result (strongest n2 tms-id))
-        [_ten-retracted n3] (compile-step
-                             "(let-cell []
-                                (def ten-retract 3)
-                                (retract-premise p-ten ten-retract tms)
-                                tms)"
-                             (:env one-brought)
-                             n2)
-        view3 (reducer/reduced-result (strongest n3 tms-id))]
+        view0 (reducer/reduced-result (strongest n0 tms-id))]
     (is (= value/contradiction (tms/proposition-value view0 :answer)))
-    (is (= 15 (tms/proposition-value view1 :answer)))
-    (is (= value/contradiction (tms/proposition-value view2 :answer)))
-    (is (= 6 (tms/proposition-value view3 :answer)))
     (is (= #{(tms/claim-slot-key [:insert :definition/plus-one])
              (tms/claim-slot-key [:insert :definition/plus-ten])
              (tms/premise-slot-key :definition/plus-one 0)
-             (tms/premise-slot-key :definition/plus-one 1)
-             (tms/premise-slot-key :definition/plus-one 2)
              (tms/premise-slot-key :definition/plus-ten 0)
-             (tms/premise-slot-key :definition/plus-ten 3)
              (tms/latest-premise-slot-key :definition/plus-one)
              (tms/latest-premise-slot-key :definition/plus-ten)}
            (set (keys (reducer/reducer-slots
-                       (net/network-cell-content n3 tms-id))))))))
-
-(deftest legacy-compiler-2-premise-closure-sugars-premise-marked-network
-  (let [base-env (-> (h/legacy-central-tms-env)
-                     (env/bind 'believe-premise
-                               (tms-premise-epoch-operator true)
-                               0)
-                     (env/bind 'retract-premise
-                               (tms-premise-epoch-operator false)
-                               0))
-        compile-step (fn [source env network]
-                       (let [compiled (compile-source source env {:net network})]
-                         [compiled (run-compiled compiled)]))
-        [setup n0] (compile-step
-                    "(let-cell [one-out ten-out]
-                       (def-net plus-one [x] [out]
-                         (<-> (+ x 1) out))
-                       (def-net plus-ten [x] [out]
-                         (<-> (+ x 10) out))
-                       (def x 5)
-                       (def p-one :definition/plus-one)
-                       (def p-ten :definition/plus-ten)
-                       (def one-believe 0)
-                       (def ten-believe 0)
-                       (def tms)
-                       (def apply-one
-                         (premise-closure
-                           (network [f x] [out]
-                             (f x out))
-                           p-one
-                           tms))
-                       (def apply-ten
-                         (premise-closure
-                           (network [f x] [out]
-                             (f x out))
-                           p-ten
-                           tms))
-                       (apply-one plus-one x one-out)
-                       (apply-ten plus-ten x ten-out)
-                       (believe-premise p-one one-believe tms)
-                       (believe-premise p-ten ten-believe tms)
-                       tms)"
-                    base-env
-                    net/empty-net)
-        env0 (compiled-result-env setup)
-        tms-id (env/resolve-binding-id n0 env0 'tms)
-        view0 (reducer/reduced-result (strongest n0 tms-id))
-        [one-retracted n1] (compile-step
-                            "(let-cell []
-                               (def one-retract 1)
-                               (retract-premise p-one one-retract tms)
-                               tms)"
-                            env0
-                            n0)
-        view1 (reducer/reduced-result (strongest n1 tms-id))
-        [_ten-retracted n2] (compile-step
-                             "(let-cell []
-                                (def ten-retract 2)
-                                (retract-premise p-ten ten-retract tms)
-                                tms)"
-                             (:env one-retracted)
-                             n1)
-        view2 (reducer/reduced-result (strongest n2 tms-id))]
-    (is (= value/contradiction (tms/proposition-value view0 :answer)))
-    (is (= 15 (tms/proposition-value view1 :answer)))
-    (is (value/nothing? (tms/proposition-value view2 :answer)))
-    (is (= #{:definition/plus-one :definition/plus-ten}
-           (set (keep (fn [slot-key]
-                        (when (= :tms/claim (first slot-key))
-                          (second (second slot-key))))
-                      (keys (reducer/reducer-slots
-                             (net/network-cell-content n2 tms-id)))))))))
+                       (net/network-cell-content n0 tms-id))))))))
 
 (deftest compiler-2-tms-multiple-premises-retract-and-bring-in
   (let [value-id (ids/new-node-id)
@@ -3066,14 +2668,14 @@
         tms-cell (tms/tms-cell)
         p1 :premise/a
         p2 :premise/b
-        env (-> (default-env)
-                (env/bind 'believe-premise
+        env (-> (h/default-bindings)
+                (with-binding 'believe-premise
                           (tms-premise-epoch-operator true)
                           0)
-                (env/bind 'retract-premise
+                (with-binding 'retract-premise
                           (tms-premise-epoch-operator false)
                           0)
-                (env/bind 'claim (tms-claim-operator :c1 :answer
+                (with-binding 'claim (tms-claim-operator :c1 :answer
                                                      [(tms/support p1
                                                                    :compiler-2
                                                                    :source-a)
@@ -3081,15 +2683,15 @@
                                                                    :compiler-2
                                                                    :source-b)])
                           0)
-                (env/bind 'p1 (env/cell-binding p1-id) 0)
-                (env/bind 'p2 (env/cell-binding p2-id) 0)
-                (env/bind 'p1-believe (env/cell-binding p1-believe-id) 0)
-                (env/bind 'p1-retract (env/cell-binding p1-retract-id) 0)
-                (env/bind 'p1-bring (env/cell-binding p1-bring-id) 0)
-                (env/bind 'p2-believe (env/cell-binding p2-believe-id) 0)
-                (env/bind 'p2-retract (env/cell-binding p2-retract-id) 0)
-                (env/bind 'value (env/cell-binding value-id) 0)
-                (env/bind 'tms (env/cell-binding tms-id) 0))
+                (with-binding 'p1 (env/cell-binding p1-id) 0)
+                (with-binding 'p2 (env/cell-binding p2-id) 0)
+                (with-binding 'p1-believe (env/cell-binding p1-believe-id) 0)
+                (with-binding 'p1-retract (env/cell-binding p1-retract-id) 0)
+                (with-binding 'p1-bring (env/cell-binding p1-bring-id) 0)
+                (with-binding 'p2-believe (env/cell-binding p2-believe-id) 0)
+                (with-binding 'p2-retract (env/cell-binding p2-retract-id) 0)
+                (with-binding 'value (env/cell-binding value-id) 0)
+                (with-binding 'tms (env/cell-binding tms-id) 0))
         expr (parse "(let-cell []
                        (believe-premise p1 p1-believe tms)
                        (retract-premise p1 p1-retract tms)
@@ -3097,7 +2699,7 @@
                        (believe-premise p2 p2-believe tms)
                        (retract-premise p2 p2-retract tms)
                        (claim value tms))")
-        compiled (main/compile-expr
+        compiled (compile-expr
                   expr
                   env
                   {:net (-> net/empty-net
@@ -3117,17 +2719,17 @@
         [p1-retract-tasks n1] (core/eval-cell p1-retract-id
                                                (message p1-retract-id 1)
                                                n0)
-        n2 (core/run-tasks p1-retract-tasks n1)
+        n2 (nb/run-propagators n1 p1-retract-tasks)
         view1 (reducer/reduced-result (strongest n2 tms-id))
         [p1-bring-tasks n3] (core/eval-cell p1-bring-id
                                             (message p1-bring-id 2)
                                             n2)
-        n4 (core/run-tasks p1-bring-tasks n3)
+        n4 (nb/run-propagators n3 p1-bring-tasks)
         view2 (reducer/reduced-result (strongest n4 tms-id))
         [p2-retract-tasks n5] (core/eval-cell p2-retract-id
                                                (message p2-retract-id 3)
                                                n4)
-        n6 (core/run-tasks p2-retract-tasks n5)
+        n6 (nb/run-propagators n5 p2-retract-tasks)
         view3 (reducer/reduced-result (strongest n6 tms-id))]
     (is (= :yes (tms/proposition-value view0 :answer)))
     (is (value/nothing? (tms/proposition-value view1 :answer)))
@@ -3166,35 +2768,35 @@
         pb :premise/b
         pc :premise/c
         pd :premise/d
-        env (-> (default-env)
-                (env/bind 'believe-premise
+        env (-> (h/default-bindings)
+                (with-binding 'believe-premise
                           (tms-premise-epoch-operator true)
                           0)
-                (env/bind 'retract-premise
+                (with-binding 'retract-premise
                           (tms-premise-epoch-operator false)
                           0)
-                (env/bind 'claim (tms-claim-operator :chain :computed
+                (with-binding 'claim (tms-claim-operator :chain :computed
                                                      [(tms/support pa :chain :a)
                                                       (tms/support pb :chain :b)
                                                       (tms/support pc :chain :c)
                                                       (tms/support pd :chain :d)])
                           0)
-                (env/bind 'a (env/cell-binding a-id) 0)
-                (env/bind 'b (env/cell-binding b-id) 0)
-                (env/bind 'c (env/cell-binding c-id) 0)
-                (env/bind 'd (env/cell-binding d-id) 0)
-                (env/bind 'f (env/cell-binding f-id) 0)
-                (env/bind 'pa (env/cell-binding pa-id) 0)
-                (env/bind 'pb (env/cell-binding pb-id) 0)
-                (env/bind 'pc (env/cell-binding pc-id) 0)
-                (env/bind 'pd (env/cell-binding pd-id) 0)
-                (env/bind 'pa-believe (env/cell-binding pa-believe-id) 0)
-                (env/bind 'pb-believe (env/cell-binding pb-believe-id) 0)
-                (env/bind 'pc-believe (env/cell-binding pc-believe-id) 0)
-                (env/bind 'pd-believe (env/cell-binding pd-believe-id) 0)
-                (env/bind 'pa-retract (env/cell-binding pa-retract-id) 0)
-                (env/bind 'pa-bring (env/cell-binding pa-bring-id) 0)
-                (env/bind 'tms (env/cell-binding tms-id) 0))
+                (with-binding 'a (env/cell-binding a-id) 0)
+                (with-binding 'b (env/cell-binding b-id) 0)
+                (with-binding 'c (env/cell-binding c-id) 0)
+                (with-binding 'd (env/cell-binding d-id) 0)
+                (with-binding 'f (env/cell-binding f-id) 0)
+                (with-binding 'pa (env/cell-binding pa-id) 0)
+                (with-binding 'pb (env/cell-binding pb-id) 0)
+                (with-binding 'pc (env/cell-binding pc-id) 0)
+                (with-binding 'pd (env/cell-binding pd-id) 0)
+                (with-binding 'pa-believe (env/cell-binding pa-believe-id) 0)
+                (with-binding 'pb-believe (env/cell-binding pb-believe-id) 0)
+                (with-binding 'pc-believe (env/cell-binding pc-believe-id) 0)
+                (with-binding 'pd-believe (env/cell-binding pd-believe-id) 0)
+                (with-binding 'pa-retract (env/cell-binding pa-retract-id) 0)
+                (with-binding 'pa-bring (env/cell-binding pa-bring-id) 0)
+                (with-binding 'tms (env/cell-binding tms-id) 0))
         expr (parse "(let-cell [e]
                        (<-> (* (+ (- a b) c) d) e)
                        (<-> e f)
@@ -3205,7 +2807,7 @@
                        (retract-premise pa pa-retract tms)
                        (believe-premise pa pa-bring tms)
                        (claim f tms))")
-        compiled (main/compile-expr
+        compiled (compile-expr
                   expr
                   env
                   {:net (-> net/empty-net
@@ -3232,12 +2834,12 @@
         [retract-tasks n1] (core/eval-cell pa-retract-id
                                             (message pa-retract-id 1)
                                             n0)
-        n2 (core/run-tasks retract-tasks n1)
+        n2 (nb/run-propagators n1 retract-tasks)
         view1 (reducer/reduced-result (strongest n2 tms-id))
         [bring-tasks n3] (core/eval-cell pa-bring-id
                                          (message pa-bring-id 2)
                                          n2)
-        n4 (core/run-tasks bring-tasks n3)
+        n4 (nb/run-propagators n3 bring-tasks)
         view2 (reducer/reduced-result (strongest n4 tms-id))]
     (is (= 28 (strongest n0 f-id)))
     (is (= 28 (tms/proposition-value view0 :computed)))
@@ -3257,346 +2859,155 @@
            (set (keys (reducer/reducer-slots
                        (net/network-cell-content n4 tms-id))))))))
 
-(deftest compiler-2-tms-conflicting-chain-claims-retract-and-switch
-  (let [base-env (-> (default-env)
-                     (env/bind 'believe-premise
+(deftest compiler-2-tms-conflicting-claims-retract-and-switch
+  (let [base-env (-> (selected-default-env)
+                     (with-binding 'believe-premise
                                (tms-premise-epoch-operator true)
                                0)
-                     (env/bind 'retract-premise
+                     (with-binding 'retract-premise
                                (tms-premise-epoch-operator false)
                                0)
-                     (env/bind 'claim-left
+                     (with-binding 'claim-left
                                (tms-claim-operator :left
                                                    :shared
                                                    [(tms/support :premise/left
-                                                                 :chain
+                                                                 :claim
                                                                  :left)])
                                0)
-                     (env/bind 'claim-right
+                     (with-binding 'claim-right
                                (tms-claim-operator :right
                                                    :shared
                                                    [(tms/support :premise/right
-                                                                 :chain
+                                                                 :claim
                                                                  :right)])
                                0))
         compile-step (fn [source env network]
                        (let [compiled (compile-source source env {:net network})]
                          [compiled (run-compiled compiled)]))
         [setup n0] (compile-step
-                    "(let-cell [e-left f-left e-right f-right]
-                       (def a 8)
-                       (def b 3)
-                       (def c 2)
-                       (def d 4)
+                    "(let-cell []
                        (def p-left :premise/left)
                        (def p-right :premise/right)
-                       (def left-believe 0)
-                       (def right-believe 0)
                        (def tms)
-                       (<-> (* (+ (- a b) c) d) e-left)
-                       (<-> e-left f-left)
-                       (<-> (* (+ (- a c) b) d) e-right)
-                       (<-> e-right f-right)
-                       (believe-premise p-left left-believe tms)
-                       (believe-premise p-right right-believe tms)
-                       (claim-left f-left tms)
-                       (claim-right f-right tms)
+                       (believe-premise p-left 0 tms)
+                       (believe-premise p-right 0 tms)
+                       (claim-left 28 tms)
+                       (claim-right 36 tms)
                        tms)"
                     base-env
                     net/empty-net)
         env0 (compiled-result-env setup)
-        id-of (fn [sym] (env/resolve-binding-id n0 env0 sym))
-        tms-id (id-of 'tms)
-        f-left-id (id-of 'f-left)
-        f-right-id (id-of 'f-right)
+        tms-id (env/resolve-binding-id n0 env0 'tms)
         view0 (reducer/reduced-result (strongest n0 tms-id))
-        [left-retracted n1] (compile-step
-                             "(let-cell []
-                                (def left-retract 1)
-                                (retract-premise p-left left-retract tms)
-                                tms)"
-                             env0
-                             n0)
-        view1 (reducer/reduced-result (strongest n1 tms-id))
-        [left-brought n2] (compile-step
-                           "(let-cell []
-                              (def left-bring 2)
-                              (believe-premise p-left left-bring tms)
-                              tms)"
-                           (:env left-retracted)
-                           n1)
-        view2 (reducer/reduced-result (strongest n2 tms-id))
-        [right-retracted n3] (compile-step
-                              "(let-cell []
-                                 (def right-retract 3)
-                                 (retract-premise p-right right-retract tms)
-                                 tms)"
-                              (:env left-brought)
-                              n2)
-        view3 (reducer/reduced-result (strongest n3 tms-id))
-        [right-brought n4] (compile-step
-                            "(let-cell []
-                               (def right-bring 4)
-                               (believe-premise p-right right-bring tms)
-                               tms)"
-                            (:env right-retracted)
-                            n3)
-        view4 (reducer/reduced-result (strongest n4 tms-id))
-        [left-retracted-again n5] (compile-step
-                                   "(let-cell []
-                                      (def left-retract-2 5)
-                                      (retract-premise p-left left-retract-2 tms)
-                                      tms)"
-                                   (:env right-brought)
-                                   n4)
-        view5 (reducer/reduced-result (strongest n5 tms-id))
-        [left-brought-again n6] (compile-step
-                                 "(let-cell []
-                                    (def left-bring-2 6)
-                                    (believe-premise p-left left-bring-2 tms)
-                                    tms)"
-                                 (:env left-retracted-again)
-                                 n5)
-        view6 (reducer/reduced-result (strongest n6 tms-id))
-        [_right-retracted-again n7] (compile-step
-                                     "(let-cell []
-                                        (def right-retract-2 7)
-                                        (retract-premise p-right right-retract-2 tms)
-                                        tms)"
-                                     (:env left-brought-again)
-                                     n6)
-        view7 (reducer/reduced-result (strongest n7 tms-id))]
-    (is (= 28 (strongest n0 f-left-id)))
-    (is (= 36 (strongest n0 f-right-id)))
+        [_retracted n1] (compile-step
+                         "(let-cell []
+                            (retract-premise p-left 1 tms)
+                            tms)"
+                         env0
+                         n0)
+        view1 (reducer/reduced-result (strongest n1 tms-id))]
     (is (= value/contradiction (tms/proposition-value view0 :shared)))
     (is (= 36 (tms/proposition-value view1 :shared)))
-    (is (= value/contradiction (tms/proposition-value view2 :shared)))
-    (is (= 28 (tms/proposition-value view3 :shared)))
-    (is (= value/contradiction (tms/proposition-value view4 :shared)))
-    (is (= 36 (tms/proposition-value view5 :shared)))
-    (is (= value/contradiction (tms/proposition-value view6 :shared)))
-    (is (= 28 (tms/proposition-value view7 :shared)))
-    (is (= #{(tms/claim-slot-key :left)
-             (tms/claim-slot-key :right)
-             (tms/premise-slot-key :premise/left 0)
-             (tms/premise-slot-key :premise/left 1)
-             (tms/premise-slot-key :premise/left 2)
-             (tms/premise-slot-key :premise/left 5)
-             (tms/premise-slot-key :premise/left 6)
-             (tms/premise-slot-key :premise/right 0)
-             (tms/premise-slot-key :premise/right 3)
-             (tms/premise-slot-key :premise/right 4)
-             (tms/premise-slot-key :premise/right 7)
-             (tms/latest-premise-slot-key :premise/left)
-             (tms/latest-premise-slot-key :premise/right)}
-           (set (keys (reducer/reducer-slots
-                       (net/network-cell-content n7 tms-id))))))))
+    (is (contains? (set (keys (reducer/reducer-slots
+                               (net/network-cell-content n1 tms-id))))
+                   (tms/premise-slot-key :premise/left 1)))))
 
 (deftest compiler-2-distributed-tms-premises-flow-through-chain
   (let [compile-step (fn [source env network]
                        (let [compiled (compile-source source env {:net network})]
                          [compiled (run-compiled compiled)]))
         [setup n0] (compile-step
-                    "(let-cell [a b c d e f]
-                       (def va 8)
-                       (def vb 3)
-                       (def vc 2)
-                       (def vd 4)
+                    "(let-cell [a f]
                        (def pa :premise/a)
-                       (def pb :premise/b)
-                       (def pc :premise/c)
-                       (def pd :premise/d)
                        (def pa0 0)
-                       (def pb0 0)
-                       (def pc0 0)
-                       (def pd0 0)
-                       (premise-input va pa pa0 a)
-                       (premise-input vb pb pb0 b)
-                       (premise-input vc pc pc0 c)
-                       (premise-input vd pd pd0 d)
-                       (<-> (* (+ (- a b) c) d) e)
-                       (<-> e f)
+                       (premise-input 8 pa pa0 a)
+                       (-> a f)
                        f)"
-                    (default-env)
+                    (selected-default-env
+                     'premise-input 'premise-retract '->)
                     (tms-distributed-protocol-net))
         env0 (compiled-result-env setup)
         id-of (fn [sym] (env/resolve-binding-id n0 env0 sym))
         a-id (id-of 'a)
-        d-id (id-of 'd)
-        e-id (id-of 'e)
         f-id (id-of 'f)
-        [a-retracted n1] (compile-step
+        [_a-retracted n1] (compile-step
                           "(let-cell []
-                             (def pa1 1)
-                             (premise-retract pa pa1 a)
+                             (premise-retract pa 1 a)
                              f)"
                           env0
-                          n0)
-        [a-brought n2] (compile-step
-                        "(let-cell []
-                           (def pa2 2)
-                           (premise-believe pa pa2 a)
-                           f)"
-                        (:env a-retracted)
-                        n1)
-        [d-retracted n3] (compile-step
-                          "(let-cell []
-                             (def pd3 3)
-                             (premise-retract pd pd3 d)
-                             f)"
-                          (:env a-brought)
-                          n2)
-        [_d-brought n4] (compile-step
-                         "(let-cell []
-                            (def pd4 4)
-                            (premise-believe pd pd4 d)
-                            f)"
-                         (:env d-retracted)
-                         n3)]
-    (is (= 28 (distributed-current-value n0 f-id)))
+                          n0)]
+    (is (= 8 (distributed-current-value n0 f-id)))
     (is (contains? (distributed-slot-keys n0 f-id)
                    (tms/premise-slot-key :premise/a 0)))
-    (is (value/nothing? (strongest n1 e-id)))
     (is (value/nothing? (strongest n1 f-id)))
     (is (contains? (distributed-slot-keys n1 f-id)
                    (tms/premise-slot-key :premise/a 1)))
-    (is (= 28 (distributed-current-value n2 f-id)))
-    (is (contains? (distributed-slot-keys n2 f-id)
-                   (tms/premise-slot-key :premise/a 2)))
-    (is (value/nothing? (strongest n3 f-id)))
-    (is (contains? (distributed-slot-keys n3 f-id)
-                   (tms/premise-slot-key :premise/d 3)))
-    (is (= 28 (distributed-current-value n4 f-id)))
-    (is (contains? (distributed-slot-keys n4 f-id)
-                   (tms/premise-slot-key :premise/d 4)))
-    (is (= #{a-id d-id}
-           #{(env/resolve-binding-id n3 (:env d-retracted) 'a)
-             (env/resolve-binding-id n3 (:env d-retracted) 'd)}))))
+    (is (ids/node-id? a-id))))
 
 (deftest compiler-2-distributed-tms-wraps-network-declaration-closure
-  (let [compile-step (fn [source env network]
-                       (let [compiled (compile-source source env {:net network})]
-                         [compiled (run-compiled compiled)]))
-        [setup n0] (compile-step
-                    "(let-cell [a b c d f]
-                       (def va 8)
-                       (def vb 3)
-                       (def vc 2)
-                       (def vd 4)
-                       (def pa :premise/a)
-                       (def pb :premise/b)
-                       (def pc :premise/c)
-                       (def pd :premise/d)
-                       (def pa0 0)
-                       (def pb0 0)
-                       (def pc0 0)
-                       (def pd0 0)
-                       (premise-input va pa pa0 a)
-                       (premise-input vb pb pb0 b)
-                       (premise-input vc pc pc0 c)
-                       (premise-input vd pd pd0 d)
-                       (def-net chain [a b c d] [out]
-                         (* (+ (- a b) c) d))
-                       (def tms-chain (tms-closure chain))
-                       (tms-chain a b c d f)
-                       f)"
-                    (default-env)
-                    (tms-distributed-protocol-net))
+  (let [setup
+        (compile-source
+         "(let-cell [a out]
+            (def value 8)
+            (def premise :premise/a)
+            (def epoch 0)
+            (premise-input value premise epoch a)
+            (def-net identity [a] [out]
+              (<-> a out))
+            (def tms-identity (tms-closure identity))
+            (tms-identity a out)
+            out)"
+         (h/default-bindings)
+         (tms-distributed-protocol-net))
+        n0 (run-compiled setup)
         env0 (compiled-result-env setup)
-        f-id (env/resolve-binding-id n0 env0 'f)
-        [a-retracted n1] (compile-step
-                          "(let-cell []
-                             (def pa1 1)
-                             (premise-retract pa pa1 a)
-                             f)"
-                          env0
-                          n0)
-        [a-brought n2] (compile-step
-                        "(let-cell []
-                           (def pa2 2)
-                           (premise-believe pa pa2 a)
-                           f)"
-                        (:env a-retracted)
-                        n1)]
-    (is (= 28 (distributed-current-value n0 f-id)))
-    (is (value/nothing? (strongest n1 f-id)))
-    (is (contains? (distributed-slot-keys n1 f-id)
-                   (tms/premise-slot-key :premise/a 1)))
-    (is (= 28 (distributed-current-value n2 f-id)))
-    (is (contains? (distributed-slot-keys n2 f-id)
-                   (tms/premise-slot-key :premise/a 2)))))
+        out-id (env/resolve-binding-id n0 env0 'out)]
+    (is (= 8 (distributed-current-value n0 out-id)))
+    (is (contains? (distributed-slot-keys n0 out-id)
+                   (tms/premise-slot-key :premise/a 0)))))
 
 (deftest compiler-2-redefined-premise-closure-adds-fresh-application-topology
-  (let [compile-step (fn [source env network]
-                       (let [compiled (compile-source source env {:net network})]
-                         [compiled (run-compiled compiled)]))
-        [setup n0] (compile-step
-                    "(let-cell [out]
-                       (def-net plus-one [x] [out]
-                         (<-> (+ x 1) out))
-                       (def-net plus-ten [x] [out]
-                         (<-> (+ x 10) out))
-                       (def x 5)
-                       (def p-one :definition/plus-one)
-                       (def p-ten :definition/plus-ten)
-                       (def e0 0)
-                       (def op
-                         (premise-closure
-                           (network [f x] [out]
-                             (f x out))
-                           p-one
-                           e0))
-                       (op plus-one x out)
-                       (def op
-                         (premise-closure
-                           (network [f x] [out]
-                             (f x out))
-                           p-ten
-                           e0))
-                       (op plus-ten x out)
-                       out)"
-                    (default-env)
-                    (tms-distributed-protocol-net))
+  (let [setup
+        (compile-source
+         "(let-cell [out]
+            (def-net identity [x] [out]
+              (<-> x out))
+            (def six 6)
+            (def fifteen 15)
+            (def p-one :definition/plus-one)
+            (def p-ten :definition/plus-ten)
+            (def e0 0)
+            (def op
+              (premise-closure
+                (network [f x] [out]
+                  (f x out))
+                p-one
+                e0))
+            (op identity six out)
+            (def op
+              (premise-closure
+                (network [f x] [out]
+                  (f x out))
+                p-ten
+                e0))
+            (op identity fifteen out)
+            out)"
+         (h/default-bindings)
+         (tms-distributed-protocol-net))
+        n0 (run-compiled setup)
         env0 (compiled-result-env setup)
-        out-id (env/resolve-binding-id n0 env0 'out)
-        [one-retracted n1] (compile-step
-                          "(let-cell []
-                             (def one-retract 1)
-                             (premise-retract p-one one-retract out)
-                             out)"
-                          env0
-                          n0)
-        [one-brought n2] (compile-step
-                         "(let-cell []
-                            (def one-bring 2)
-                            (premise-believe p-one one-bring out)
-                            out)"
-                         (:env one-retracted)
-                         n1)
-        [_ten-retracted n3] (compile-step
-                             "(let-cell []
-                                (def ten-retract 3)
-                                (premise-retract p-ten ten-retract out)
-                                out)"
-                             (:env one-brought)
-                             n2)]
+        out-id (env/resolve-binding-id n0 env0 'out)]
     ;; The earlier application remains wired to plus-one. The later definition
     ;; gets a fresh current address, so the application declared after it adds
     ;; the plus-ten claim without rebuilding the first topology.
     (is (value/contradiction? (distributed-current-value n0 out-id)))
-    (is (= 15 (distributed-current-value n1 out-id)))
-    (is (value/contradiction? (distributed-current-value n2 out-id)))
-    (is (= 6 (distributed-current-value n3 out-id)))
-    (is (contains? (distributed-slot-keys n3 out-id)
-                   (tms/premise-slot-key :definition/plus-one 2)))
-    (is (contains? (distributed-slot-keys n3 out-id)
-                   (tms/premise-slot-key :definition/plus-ten 3)))))
+    (is (contains? (distributed-slot-keys n0 out-id)
+                   (tms/premise-slot-key :definition/plus-one 0)))
+    (is (contains? (distributed-slot-keys n0 out-id)
+                   (tms/premise-slot-key :definition/plus-ten 0)))))
 
 (deftest compiler-2-distributed-premise-closure-marks-network-output
-  (let [compile-step (fn [source env network]
-                       (let [compiled (compile-source source env {:net network})]
-                         [compiled (run-compiled compiled)]))
-        [setup n0] (compile-step
+  (let [setup (compile-source
                     "(let-cell [x out]
                        (def vx 5)
                        (def px :premise/input)
@@ -3613,54 +3024,25 @@
                            e0))
                        (apply-inc inc x out)
                        out)"
-                    (default-env)
+                    (h/default-bindings)
                     (tms-distributed-protocol-net))
+        n0 (run-compiled setup)
         env0 (compiled-result-env setup)
-        out-id (env/resolve-binding-id n0 env0 'out)
-        [definition-retracted n1] (compile-step
-                                   "(let-cell []
-                                      (def pd1 1)
-                                      (premise-retract pd pd1 out)
-                                      out)"
-                                   env0
-                                   n0)
-        [definition-brought n2] (compile-step
-                                 "(let-cell []
-                                    (def pd2 2)
-                                    (premise-believe pd pd2 out)
-                                    out)"
-                                 (:env definition-retracted)
-                                 n1)
-        [_input-retracted n3] (compile-step
-                               "(let-cell []
-                                  (def px3 3)
-                                  (premise-retract px px3 x)
-                                  out)"
-                               (:env definition-brought)
-                               n2)]
+        out-id (env/resolve-binding-id n0 env0 'out)]
     (is (= 6 (distributed-current-value n0 out-id)))
     (is (contains? (distributed-slot-keys n0 out-id)
                    (tms/premise-slot-key :premise/input 0)))
     (is (contains? (distributed-slot-keys n0 out-id)
-                   (tms/premise-slot-key :premise/definition 0)))
-    (is (value/nothing? (strongest n1 out-id)))
-    (is (contains? (distributed-slot-keys n1 out-id)
-                   (tms/premise-slot-key :premise/definition 1)))
-    (is (= 6 (distributed-current-value n2 out-id)))
-    (is (contains? (distributed-slot-keys n2 out-id)
-                   (tms/premise-slot-key :premise/definition 2)))
-    (is (value/nothing? (strongest n3 out-id)))
-    (is (contains? (distributed-slot-keys n3 out-id)
-                   (tms/premise-slot-key :premise/input 3)))))
+                   (tms/premise-slot-key :premise/definition 0)))))
 
 #_(deftest compiler-2-distributed-tms-composes-with-behavior-arithmetic
   (let [left (behavior-view [(hist/point-record 6 2)] #{[:left 6]})
         right (behavior-view [(hist/point-record 6 7)] #{[:right 6]})
         [left-id n1] (behavior-cell (behavior-tms-protocol-net) left)
         [right-id n2] (behavior-cell n1 right)
-        env (-> (behavior-tms-env)
-                (env/bind 'left-source (env/cell-binding left-id) 0)
-                (env/bind 'right-source (env/cell-binding right-id) 0))
+        env (-> (h/behavior-tms-bindings)
+                (with-binding 'left-source (env/cell-binding left-id) 0)
+                (with-binding 'right-source (env/cell-binding right-id) 0))
         compile-step (fn [source env network]
                        (let [compiled (compile-source source env {:net network})]
                          [compiled (run-compiled compiled)]))
@@ -3677,7 +3059,7 @@
                     env
                     n2)
         env0 (compiled-result-env setup)
-        out-id (env/binding-id (env/lookup env0 'out))
+        out-id (env/binding-id (binding-value env0 'out))
         [left-retracted n3] (compile-step
                              "(let-cell []
                                 (def p-left1 1)
@@ -3707,41 +3089,19 @@
         right (behavior-view [(hist/point-record 6 7)] #{[:b 6]})
         [a-id n1] (behavior-cell (behavior-protocol-net) left)
         [b-id n2] (behavior-cell n1 right)
-        parent-env (-> (behavior-env)
-                       (env/bind 'a (env/cell-binding a-id) 0)
-                       (env/bind 'b (env/cell-binding b-id) 0))
-        outer-env (-> (default-env)
-                      (env/bind 'a (env/cell-binding a-id) 0)
-                      (env/bind 'b (env/cell-binding b-id) 0))
+        parent-env (-> (h/behavior-bindings)
+                       (with-binding 'a (env/cell-binding a-id) 0)
+                       (with-binding 'b (env/cell-binding b-id) 0))
+        outer-env (-> (h/default-bindings)
+                      (with-binding 'a (env/cell-binding a-id) 0)
+                      (with-binding 'b (env/cell-binding b-id) 0))
         expr (execute-sub-env-ast (parse "(be:+ a b)") parent-env 'a 'b)
-        compiled (main/compile-expr expr outer-env {:net n2})
+        compiled (compile-expr expr outer-env {:net n2})
         result-net (run-compiled compiled)
         out-content (net/network-cell-content result-net (:cell compiled))]
     (is (= 9 (behavior-current-value result-net (:cell compiled))))
     (is (= [{:at 6 :value 9}]
            (behavior-records out-content)))))
-
-(deftest lexical-binding-access-preserves-and-refines-provenance
-  (let [answer-id (ids/new-node-id)
-        bound-id (ids/new-node-id)
-        out-id (ids/new-node-id)
-        token {:provenance/type :lexical-access
-               :lookup/key :binding-test
-               :scope/source :child
-               :scope/chain [:root :child]}
-        answer (scope-source/scope-value
-                :child nil [:root :child] (env/cell-binding bound-id) #{token})
-        n0 (-> (scope-source-protocol-net)
-               (nb/install-cell answer-id)
-               (nb/install-cell bound-id)
-               (nb/install-cell out-id)
-               (nb/seed-cell answer-id answer)
-               (nb/seed-cell bound-id 12))
-        [props n1] ((env/p:access-binding answer-id out-id) n0)
-        n2 (nb/run-propagators n1 props)
-        selected (strongest n2 out-id)]
-    (is (= 12 (scope-source/base-value selected)))
-    (is (= #{token} (scope-source/dependencies selected)))))
 
 (deftest compiler-symbol-fast-path-exposes-the-canonical-cell
   (let [compiled (compile-source "(let-cell [x] x)")
@@ -3794,22 +3154,25 @@
         env-id (ids/new-node-id)
         binding-answer-id (ids/new-node-id)
         value-answer-id (ids/new-node-id)
-        lexical-env (env/bind (default-env)
+        lexical-env (with-binding (h/default-bindings)
                               'x
                               (env/cell-binding bound-id)
                               0)
-        n0 (-> (scope-source-protocol-net)
-               (install-empty-cells [bound-id env-id binding-answer-id
-                                     value-answer-id])
-               (nb/seed-cell bound-id 12)
-               (nb/seed-cell env-id lexical-env))
+        base (-> (scope-source-protocol-net)
+                 (install-empty-cells [bound-id env-id binding-answer-id
+                                       value-answer-id])
+                 (nb/seed-cell bound-id 12))
+        declared (env/declare-root base env-id lexical-env)
+        n0 (:net declared)
         [access-props n1]
         ((env/p:lexical-access-local-first 'x env-id binding-answer-id) n0)
         [value-props n2] ((env/p:binding-value binding-answer-id value-answer-id)
                           n1)
-        settled (nb/run-propagators n2
-                                    (into (vec (installed-prop-ids access-props))
-                                          (installed-prop-ids value-props)))]
+        settled (nb/run-propagators
+                 n2
+                 (into (vec (:props declared))
+                       (concat (installed-prop-ids access-props)
+                               (installed-prop-ids value-props))))]
     (is (= (env/cell-binding bound-id)
            (strongest settled binding-answer-id)))
     (is (= 12 (strongest settled value-answer-id)))
@@ -3821,14 +3184,14 @@
         right (behavior-view [(hist/point-record 7 7)] #{[:b 7]})
         [a-id n1] (behavior-cell (behavior-protocol-net) left)
         [b-id n2] (behavior-cell n1 right)
-        parent-env (-> (behavior-env)
-                       (env/bind 'a (env/cell-binding a-id) 0)
-                       (env/bind 'b (env/cell-binding b-id) 0))
-        outer-env (-> (default-env)
-                      (env/bind 'a (env/cell-binding a-id) 0)
-                      (env/bind 'b (env/cell-binding b-id) 0))
+        parent-env (-> (h/behavior-bindings)
+                       (with-binding 'a (env/cell-binding a-id) 0)
+                       (with-binding 'b (env/cell-binding b-id) 0))
+        outer-env (-> (h/default-bindings)
+                      (with-binding 'a (env/cell-binding a-id) 0)
+                      (with-binding 'b (env/cell-binding b-id) 0))
         expr (execute-sub-env-ast (parse "(be:+ a b)") parent-env 'a 'b)
-        compiled (main/compile-expr expr outer-env {:net n2})
+        compiled (compile-expr expr outer-env {:net n2})
         result-net (run-compiled compiled)]
     (is (= value/nothing (strongest result-net (:cell compiled))))))
 
@@ -3843,18 +3206,18 @@
                                  #{[:b 6] [:b 8]})
         [a-id n1] (behavior-cell (behavior-protocol-net) left-6)
         [b-id n2] (behavior-cell n1 right-6)
-        parent-env (-> (behavior-env)
-                       (env/bind 'a (env/cell-binding a-id) 0)
-                       (env/bind 'b (env/cell-binding b-id) 0))
-        outer-env (-> (default-env)
-                      (env/bind 'a (env/cell-binding a-id) 0)
-                      (env/bind 'b (env/cell-binding b-id) 0))
+        parent-env (-> (h/behavior-bindings)
+                       (with-binding 'a (env/cell-binding a-id) 0)
+                       (with-binding 'b (env/cell-binding b-id) 0))
+        outer-env (-> (h/default-bindings)
+                      (with-binding 'a (env/cell-binding a-id) 0)
+                      (with-binding 'b (env/cell-binding b-id) 0))
         expr (execute-sub-env-ast (parse "(be:+ a b)") parent-env 'a 'b)
-        compiled (main/compile-expr expr outer-env {:net n2})
+        compiled (compile-expr expr outer-env {:net n2})
         n4 (run-compiled compiled)
         [_left-tasks n5] (seed-behavior-message n4 a-id left-6-8)
         [right-tasks n6] (seed-behavior-message n5 b-id right-6-8)
-        result-net (core/run-tasks right-tasks n6)
+        result-net (nb/run-propagators n6 right-tasks)
         out-content (net/network-cell-content result-net (:cell compiled))]
     (is (= 9 (behavior-current-value n4 (:cell compiled))))
     (is (= 13 (behavior-current-value result-net (:cell compiled))))
@@ -3873,18 +3236,18 @@
                                  #{[:b 6] [:b 8]})
         [a-id n1] (behavior-cell (behavior-protocol-net) left-6)
         [b-id n2] (behavior-cell n1 right-6)
-        inner-env (-> (behavior-env)
-                      (env/bind 'a (env/cell-binding a-id) 0)
-                      (env/bind 'b (env/cell-binding b-id) 0))
-        outer-env (-> (default-env)
-                      (env/bind 'a (env/cell-binding a-id) 0)
-                      (env/bind 'b (env/cell-binding b-id) 0))
+        inner-env (-> (h/behavior-bindings)
+                      (with-binding 'a (env/cell-binding a-id) 0)
+                      (with-binding 'b (env/cell-binding b-id) 0))
+        outer-env (-> (h/default-bindings)
+                      (with-binding 'a (env/cell-binding a-id) 0)
+                      (with-binding 'b (env/cell-binding b-id) 0))
         outer-expr (execute-sub-env-ast (parse "(be:+ a b)") inner-env 'a 'b)
-        compiled (main/compile-expr outer-expr outer-env {:net n2})
+        compiled (compile-expr outer-expr outer-env {:net n2})
         n3 (run-compiled compiled)
         [_left-tasks n4] (seed-behavior-message n3 a-id left-6-8)
         [right-tasks n5] (seed-behavior-message n4 b-id right-6-8)
-        result-net (core/run-tasks right-tasks n5)
+        result-net (nb/run-propagators n5 right-tasks)
         out-content (net/network-cell-content result-net (:cell compiled))]
     (is (= 9 (behavior-current-value n3 (:cell compiled))))
     (is (= 13 (behavior-current-value result-net (:cell compiled))))

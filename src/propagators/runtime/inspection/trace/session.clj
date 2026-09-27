@@ -9,6 +9,7 @@
             [propagators.infra.message :refer [message]]
             [propagators.infra.network :as net]
             [propagators.infra.network-builder :as nb]
+            [propagators.infra.runner :as runner]
             [propagators.infra.semantic-trace :as semantic-trace])
   (:import [java.util.concurrent TimeUnit]))
 
@@ -37,7 +38,8 @@
                                 source-id direction-id request-id)
                                n0)
          [trace-prop-id n2] ((semantic-trace/p:semantic-trace request-id graph-id out-id) n1)
-         n3 (nb/run-propagators n2 [request-prop-id trace-prop-id])]
+         n3 (runner/completed-network
+             (runner/run-network [request-prop-id trace-prop-id] n2))]
      (net/network-cell-strongest n3 out-id))))
 
 (defn resolved-trace-request

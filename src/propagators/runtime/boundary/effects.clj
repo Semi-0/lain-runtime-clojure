@@ -5,6 +5,7 @@
             [propagators.runtime.boundary.display :as display]
             [propagators.runtime.inspection.graph-projection :as graphp]
             [propagators.runtime.inspection.retraction :as retraction]
+            [propagators.runtime.session.extension :as extension]
             [propagators.runtime.session.state :as state]
             [propagators.runtime.inspection.temperature :as temperature]
             [propagators.runtime.inspection.semantic-graph :as semantic-repl]
@@ -113,7 +114,52 @@
                                program-net)]
     (assoc state :program/net program-net)))
 
-(defn- perform-environment-request
+(defn- validate-handler-result
+  [request result]
+  (cond
+    (not (map? result))
+    (throw (ex-info "Environment effect handler must return a map"
+                    {:request request :result result}))
+
+    (not (map? (:state result)))
+    (throw (ex-info "Environment effect handler returned no session state"
+                    {:request request :result result}))
+
+    (not (map? (:receipt result)))
+    (throw (ex-info "Environment effect handler returned no receipt"
+                    {:request request :result result}))
+
+    (nil? (get-in result [:receipt :status]))
+    (throw (ex-info "Environment effect receipt has no status"
+                    {:request request :result result}))
+
+    :else
+    result))
+
+(defn- execute-environment-request
+  [state request]
+  (let [key [(:boundary/port request) (:boundary/kind request)]
+        registration (get-in state [:environment/handlers key])
+        handler (:handler registration)]
+    (cond
+      (nil? registration)
+      (throw (ex-info "No environment effect handler is registered"
+                      {:handler-key key :request request}))
+
+      (satisfies? extension/EffectHandler handler)
+      (validate-handler-result
+       request
+       (extension/handle-effect
+        handler
+        {:drain-environment-effects drain-environment-effects}
+        state
+        request))
+
+      :else
+      (throw (ex-info "Registered environment effect handler is invalid"
+                      {:handler-key key :registration registration})))))
+
+(defn perform-registered-environment-request
   [state request]
   (let [effect-id (:boundary/id request)
         existing (get-in state [:environment/effects effect-id])]
@@ -135,10 +181,8 @@
                        :request request
                        :receipt-ids #{(:boundary/receipt-id request)}})]
         (try
-          (let [perform (requiring-resolve
-                         'propagators.runtime.session.environment-io/perform-request)
-                {next-state :state receipt :receipt}
-                (perform processing request drain-environment-effects)]
+          (let [{next-state :state receipt :receipt}
+                (execute-environment-request processing request)]
             (-> next-state
                 (assoc-in [:environment/effects effect-id]
                           {:status (:status receipt)
@@ -179,7 +223,7 @@
                          :pending (mapv :boundary/id requests)}))
 
         :else
-        (recur (reduce perform-environment-request current requests)
+        (recur (reduce perform-registered-environment-request current requests)
                (inc round))))))
 
 (defn record-xr-launch
@@ -356,7 +400,7 @@
                {})
        vals))
 
-(defn perform-boundary-effects
+(defn- perform-boundary-effects*
   [state]
   (let [started (System/nanoTime)
         state (drain-environment-effects state)
@@ -366,6 +410,7 @@
         state' (reduce (fn [s request]
                          (case [(:boundary/port request) (:boundary/kind request)]
                            [:xr :xr/launch-trace] (record-xr-launch s request)
+                           [:xr :xr/present-view] (record-xr-launch s request)
                            [:xr :xr/trace-subscribe] (record-trace-subscription s request)
                            [:xr :xr/widget-register] (record-widget-register s request)
                            [:tui :tui/write-block] (record-tui-write s request)
@@ -381,6 +426,13 @@
                         :effects/boundary
                         (count requests)
                         (temperature/elapsed-ms started))))
+
+(defn perform-boundary-effects
+  [state]
+  (state/run-session-activation
+   state
+   :effects/boundary
+   perform-boundary-effects*))
 
 (defn refresh-program-graph
   [state]

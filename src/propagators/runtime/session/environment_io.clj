@@ -6,15 +6,14 @@
   forms always return through the canonical compiler-2 CPS entrypoint."
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
-            [propagators.compiler.model.env :as cenv]
             [propagators.compiler.model.operator-value :as operator-value]
             [propagators.runtime.session.program :as program]
+            [propagators.runtime.session.extension :as extension]
             [propagators.runtime.session.environment-export :as export]
             [propagators.runtime.session.program.source :as source]
             [propagators.runtime.session.state :as state]
             [propagators.runtime.session.block-model :as block-model]
-            [propagators.runtime.session.versioned-commit :as versioned-commit]
-            [propagators.infra.network-builder :as nb])
+            [propagators.runtime.session.versioned-commit :as versioned-commit])
   (:import [java.nio.charset StandardCharsets]
            [java.nio.file Files Path StandardCopyOption]
            [java.security MessageDigest]
@@ -225,23 +224,22 @@
   (let [canonical (canonical-file file)
         digest (file-digest canonical)
         bindings (read-primitive-bindings canonical entry)
-        parent-id (:program/env runtime-state)
-        child-id (state/stable-node-id :live-primitive-environment
-                                       (.getPath canonical) entry revision digest)
-        [scope-props scoped-net]
-        ((cenv/p:scope-frame parent-id child-id (set (map first bindings)))
-         (:program/net runtime-state))
-        declared (cenv/declare-bindings scoped-net child-id child-id bindings)
-        props (into (vec scope-props) (:props declared))
-        installed (nb/run-propagators (:net declared) props)
+        extension-id [:live-primitive-environment
+                      (.getPath canonical) entry revision digest]
+        bundle (extension/extension-bundle
+                {:id extension-id
+                 :bindings bindings
+                 :effects []})
+        installed (extension/install-session-extension
+                   runtime-state bundle {})
+        child-id (:program/env installed)
         import-record {:file (.getPath canonical)
                        :entry entry
                        :revision revision
                        :digest digest
                        :environment child-id
                        :binding-count (count bindings)}]
-    {:state (-> runtime-state
-                (assoc :program/net installed :program/env child-id)
+    {:state (-> installed
                 (update :environment/primitive-imports (fnil conj []) import-record)
                 (update :environment/source-ledger
                         (fnil conj [])
@@ -488,26 +486,26 @@
                           receipt)
          :receipt receipt}))))
 
-(defn perform-request
-  "Evaluate one environment boundary request.  `drain-effects` is supplied by
-  the boundary driver so nested loads reach equilibrium before the next form."
-  [runtime-state request drain-effects]
-  (let [payload (:boundary/payload request)]
-    (case (:boundary/kind request)
-      :environment/load-primitive-environment
-      (install-primitive-environment runtime-state payload)
+(defn load-primitive-environment
+  [_services runtime-state request]
+  (install-primitive-environment runtime-state (:boundary/payload request)))
 
-      :environment/load-lain
-      (load-lain-state runtime-state payload drain-effects)
+(defn load-lain
+  [services runtime-state request]
+  (load-lain-state runtime-state
+                   (:boundary/payload request)
+                   (:drain-environment-effects services)))
 
-      :environment/load-blocks
-      (load-blocks-state runtime-state payload drain-effects)
+(defn load-blocks
+  [services runtime-state request]
+  (load-blocks-state runtime-state
+                     (:boundary/payload request)
+                     (:drain-environment-effects services)))
 
-      :environment/save-environment
-      (save-state runtime-state payload)
+(defn save-environment
+  [_services runtime-state request]
+  (save-state runtime-state (:boundary/payload request)))
 
-      :environment/save-blocks
-      (save-state runtime-state payload)
-
-      (throw (ex-info "unknown environment boundary request"
-                      {:request request})))))
+(defn save-blocks
+  [_services runtime-state request]
+  (save-state runtime-state (:boundary/payload request)))

@@ -3,16 +3,16 @@
   (:require [propagators.infra.cells.cell :as cell]
             [propagators.infra.cells.value :as value]
             [propagators.compiler.compiler.basis :as basis]
-            [propagators.compiler.model.application-value :as application]
             [propagators.compiler.operators.versioned-definition :as definition]
+            [propagators.compiler.lowering.application :as application]
             [propagators.runtime.session.block-model :as block-model]
-            [propagators.infra.core :as core]
-            [propagators.infra.datastructures.compound-object :as obj]
             [propagators.infra.datastructures.tms.distributed :as tms]
+            [propagators.infra.gur.flat :as fvm]
             [propagators.infra.graph :as graph]
             [propagators.infra.helpers.task-queue :as task-queue]
             [propagators.infra.network :as net]
             [propagators.infra.propagator :as prop]
+            [propagators.infra.runner :as runner]
             [clojure.string :as str]))
 
 (def max-events 10000)
@@ -58,36 +58,46 @@
   "Run `f` unchanged while observing propagator activations on this thread."
   [before-network f]
   (let [owner (Thread/currentThread)
-        original core/eval-propagator
         events (atom [])
         totals (atom {:activations 0 :elapsed-ns 0 :truncated? false})
-        observed
-        (fn [prop-id tasks network]
-          (if-not (identical? owner (Thread/currentThread))
-            (original prop-id tasks network)
-            (let [started (System/nanoTime)
-                  outcome (try
-                            {:result (original prop-id tasks network)}
-                            (catch Throwable t {:error t}))
-                  elapsed (- (System/nanoTime) started)
-                  error (:error outcome)
-                  [next-tasks next-network] (or (:result outcome)
-                                                [tasks network])
-                  event (activation-event network next-network prop-id
-                                          next-tasks elapsed error)]
-              (swap! totals (fn [summary]
-                              (-> summary
-                                  (update :activations inc)
-                                  (update :elapsed-ns + elapsed)
-                                  (assoc :truncated?
-                                         (>= (:activations summary)
-                                             max-events)))))
-              (when (< (count @events) max-events)
-                (swap! events conj event))
-              (if error
-                (throw error)
-                [next-tasks next-network]))))]
-    (with-redefs [core/eval-propagator observed]
+        observer
+        (fn [advance]
+          (fn [{:keys [network tasks] :as state} continuations]
+            (if (or (not (identical? owner (Thread/currentThread)))
+                    (task-queue/queue-empty? tasks))
+              (advance state continuations)
+              (let [[prop-id _remaining] (task-queue/pop-task tasks)
+                    started (System/nanoTime)
+                    record! (fn [next-network next-tasks error]
+                              (let [elapsed (- (System/nanoTime) started)
+                                    event (activation-event
+                                           network next-network prop-id
+                                           next-tasks elapsed error)]
+                                (swap! totals
+                                       (fn [summary]
+                                         (-> summary
+                                             (update :activations inc)
+                                             (update :elapsed-ns + elapsed)
+                                             (assoc :truncated?
+                                                    (>= (:activations summary)
+                                                        max-events)))))
+                                (when (< (count @events) max-events)
+                                  (swap! events conj event))))
+                    wrapped (-> continuations
+                                (assoc :continue
+                                       (fn [next-state]
+                                         (record! (:network next-state)
+                                                  (:tasks next-state) nil)
+                                         ((:continue continuations) next-state)))
+                                (assoc :fail
+                                       (fn [error]
+                                         (record! network tasks error)
+                                         ((:fail continuations) error))))]
+                (advance state wrapped)))))]
+    (binding [runner/*advance-transform*
+              (runner/compose-advance-transforms
+               observer
+               runner/*advance-transform*)]
       {:result (f)
        :profile (assoc @totals
                        :events @events
@@ -124,24 +134,29 @@
 
 (defn- application-row
   [network record ordinal application-id]
-  (let [info (cell-value network application-id)]
-    {:application/id application-id
-     :application/ordinal ordinal
-     :source {:kind :block-version
-              :client-id (:client-id record)
-              :block-index (:index record)
-              :version (:version record)}
-     :active? (:premise/active? (record-context network record))
-     :operator-ast (when (application/application-info? info)
-                     (obj/slot-value info application/application-operator-ast-slot))
-     :operator-cell (when (application/application-info? info)
-                      (obj/slot-value info application/application-operator-cell-slot))
-     :arg-cells (when (application/application-info? info)
-                  (obj/slot-value info application/application-arg-cells-slot))
-     :output-cell (when (application/application-info? info)
-                    (obj/slot-value info application/application-output-slot))
-     :lowering (when (application/application-info? info)
-                 (obj/slot-value info application/application-lowering-slot))}))
+  (let [topology (application/application-topology network application-id)
+        row
+        {:application/id application-id
+         :application/ordinal ordinal
+         :source {:kind :block-version
+                  :client-id (:client-id record)
+                  :block-index (:index record)
+                  :version (:version record)}
+         :active? (:premise/active? (record-context network record))}]
+    (cond
+      topology
+      (assoc row
+             :operator-cell (:operator-id topology)
+             :arg-cells (:argument-ids topology)
+             :context-cell (:context-id topology)
+             :captured-environment-cell
+             (:captured-environment-id topology)
+             :frame-cell (:frame-id topology)
+             :output-cell (:result-id topology)
+             :lowering :flat-gur)
+
+      :else
+      (assoc row :topology/missing? true))))
 
 (defn- block-application-rows
   [network records]
@@ -159,12 +174,17 @@
 
 (defn- candidate-application-rows
   [network]
-  (let [candidates (net/network-dict-entry network definition/candidates-key)]
+  (let [candidates (net/network-dict-entry network definition/candidates-key)
+        calls (get (net/network-dict-entry network fvm/name-bindings-key)
+                   definition/call-metadata-scope
+                   {})]
     (mapv
-     (fn [[[call-id candidate-id] _call]]
+     (fn [[[call-id candidate-id] call]]
        (let [candidate (get candidates candidate-id)
              context (:candidate/context candidate)]
-         {:application/id (candidate-application-id call-id candidate-id)
+         {:application/id
+          (or (:application-id call)
+              (candidate-application-id call-id candidate-id))
           :source {:kind :definition-candidate
                    :name (:candidate/name candidate)
                    :block-id (:candidate/block-id candidate)
@@ -174,7 +194,7 @@
                                          (:premise/id context)
                                          (:premise/state-cell context)))
           :operator-ast (:candidate/name candidate)}))
-     (net/network-dict-entry network definition/calls-key))))
+     calls)))
 
 (defn- all-contexts
   [network records]

@@ -4,9 +4,11 @@
             [propagators.runtime.boundary :as boundary]
             [propagators.runtime.boundary.effects :as effects]
             [propagators.runtime.operators :as runtime-ops]
+            [propagators.runtime.session.extension :as extension]
             [propagators.runtime.session.program.source :as source]
             [propagators.runtime.session.state :as state]
             [propagators.runtime.inspection.semantic-graph :as semantic-repl]
+            [propagators.infra.cell-evaluator :as cell-evaluator]
             [propagators.infra.cells.value :as value]
             [propagators.compiler.language.ast :as ast]
             [propagators.compiler.model.closure-value :as closure-value]
@@ -16,13 +18,13 @@
             [propagators.compiler.lowering.application :as compiler-app]
             [propagators.compiler.model.env :as cenv]
             [propagators.compiler.main :as compiler]
-            [propagators.infra.core :as core]
             [propagators.infra.datastructures.compound-object :as obj]
             [propagators.infra.datastructures.scope-source :as scope-source]
             [propagators.infra.ids :as ids]
             [propagators.infra.message :refer [message]]
             [propagators.infra.network :as net]
             [propagators.infra.network-builder :as nb]
+            [propagators.infra.runner :as runner]
             [propagators.infra.stdlib.prop :as stdlib-prop]
             [propagators.infra.semantic-trace :as semantic-trace]))
 
@@ -47,38 +49,16 @@
 
 (declare runtime-compiler)
 
-(defn runtime-application-installer
-  [application-id operator-id args-id arg-ids context-id out-id]
-  (compiler-app/p:apply-application-with runtime-compiler
-                                         application-id
-                                         operator-id
-                                         args-id
-                                         arg-ids
-                                         context-id
-                                         out-id))
-
 (defn runtime-compiler
   [compiler-state expr]
-  (compiler/default-compiler
-   (assoc compiler-state :application-installer runtime-application-installer)
-   expr))
+  (compiler/default-compiler compiler-state expr))
 
 (defn runtime-compile-options
   [opts]
-  (assoc opts
-         :compiler (or (:compiler opts) runtime-compiler)
-         :application-installer runtime-application-installer))
+  (assoc opts :compiler (or (:compiler opts) runtime-compiler)))
 
 (declare runtime-env
          settle-application-props)
-
-(defn- expose-application-boundary-outputs
-  [program-net]
-  (net/update-net-dict-entry
-   program-net
-   compiler-app/application-extra-output-ids-key
-   (fnil conj #{})
-   (boundary-outbox-id)))
 
 (defn compiled-state
   ([source]
@@ -88,7 +68,6 @@
      (let [graph-id (runtime-graph-id)
         base-state (assoc (empty-state) :runtime/options options)
         base-net (-> (:program/net base-state)
-                     expose-application-boundary-outputs
                      (nb/ensure-cell (boundary-outbox-id))
                      (nb/install-cell graph-id
                                       (semantic-trace/graph-union (empty-graph))
@@ -104,14 +83,15 @@
                                           (runtime-compile-options
                                            {:net (:net environment)
                                             :seed [:runtime/xr source]}))
-        network0 (nb/run-propagators (:net compiled) (:props compiled))
-        [tasks network1] (core/eval-cells
-                          [(message graph-id
-                                    (semantic-repl/compiled-semantic-graph
-                                     compiled
-                                     network0))]
-                          network0)
-        network2 (core/run-tasks tasks network1)
+        network0 (runner/completed-network
+                  (runner/run-network (:props compiled) (:net compiled)))
+        [tasks network1]
+        (cell-evaluator/evaluate-all
+         [(message graph-id
+                   (semantic-repl/compiled-semantic-graph compiled network0))]
+         network0)
+        network2 (runner/completed-network
+                  (runner/run-network tasks network1))
         network (settle-application-props network2 (:props compiled))
         graph (assoc (semantic-repl/compiled-semantic-graph compiled network)
                      :source source)]
@@ -124,6 +104,10 @@
      :program/graph graph
      :program/results {}
      :program/epoch 0
+     :runtime/errors (:runtime/errors base-state)
+     :environment/effects {}
+     :environment/handlers (:environment/handlers base-state)
+     :session/extensions (:session/extensions base-state)
      :block-order []
      :next-order 0
      :tuis {}
@@ -177,7 +161,8 @@
                   [:block-result (:premise/id context)] raw-id contexts out-id)
                  program-net)]
             [(assoc compiled :cell out-id)
-             (nb/run-propagators installed [prop-id])]))))))
+             (runner/completed-network
+              (runner/run-network [prop-id] installed))]))))))
 
 (defn namespace-graph
   [graph prefix]
@@ -221,7 +206,7 @@
   [n {:keys [instance-id blocks-id]}]
   (let [[_cell-id prop-ids n]
         (obj/install-slot-access n :instance/blocks instance-id blocks-id)]
-    (nb/run-propagators n prop-ids)))
+    (runner/completed-network (runner/run-network prop-ids n))))
 
 (defn install-block-slots
   [n {:keys [block-id index-id text-id display-id next-id]}]
@@ -233,11 +218,10 @@
         (obj/install-slot-access n :block/display block-id display-id)
         [_next-cell next-props n]
         (obj/install-slot-access n :cdr block-id next-id)]
-    (nb/run-propagators n
-                        (into [] cat [index-props
-                                     text-props
-                                     display-props
-                                     next-props]))))
+    (runner/completed-network
+     (runner/run-network
+      (into [] cat [index-props text-props display-props next-props])
+      n))))
 
 (defn seed-program-instances [state program-net]
   (reduce-kv
@@ -322,13 +306,13 @@
                                                           instance-id))]
              ['be:block (runtime-ops/be-block-target-operator
                          (boundary-outbox-id) instance-id)]
-             ['load-blocks
-              (runtime-ops/load-blocks-operator (boundary-outbox-id)
-                                                current-client-id)]
-             ['save-blocks
-              (runtime-ops/save-blocks-operator (boundary-outbox-id)
-                                                current-client-id)]
-             ['% (cenv/cell-binding instance-id)]]))))
+             ['% (cenv/cell-binding instance-id)]])
+
+      instance-id
+      (into (extension/program-bindings
+             extension/client-extension
+             {:outbox-id (boundary-outbox-id)
+              :client-id current-client-id})))))
 
 (defn runtime-env
   ([runtime-state network base-env graph-id current-client-id scope-key]
@@ -337,40 +321,23 @@
   ([runtime-state network base-env graph-id current-client-id scope-key
     {:keys [fixed-scope?]}]
    (let [dynamic (dynamic-runtime-bindings runtime-state current-client-id)]
-     (if-not (ids/node-id? base-env)
-       (let [root-id (state/stable-node-id :compiler-2 :runtime-env :root)
-             initial (reduce (fn [environment [sym binding]]
-                               (cenv/bind-at environment sym binding 0))
-                             base-env
-                             (into dynamic
-                                   (static-runtime-bindings runtime-state graph-id)))
-             [network env-id] (cenv/import-environment network root-id initial)]
-         {:net network :env env-id :props []})
-       (let [child-id (state/stable-node-id :compiler-2 :runtime-env scope-key)
-             scope-installer (if fixed-scope?
-                               (cenv/p:scope-frame base-env child-id)
-                               (cenv/p:sub-env base-env child-id))
-             [scope-props network] (scope-installer
-                                    (nb/ensure-cell network base-env))
-             declared (cenv/declare-bindings network child-id child-id dynamic)
-             props (into (vec scope-props) (:props declared))]
-         {:net (nb/run-propagators (:net declared) props)
-          :env child-id
-          :props props})))))
-
-(defn retained-application-props
-  [program-net]
-  (vec (get (net/net-dict-or-empty program-net)
-            compiler-app/apply-application-props-key
-            #{})))
+     (when-not (ids/node-id? base-env)
+       (throw (ex-info "Runtime environment must be a live environment cell"
+                       {:environment base-env})))
+     (let [child-id (state/stable-node-id :compiler-2 :runtime-env scope-key)
+           bindings (into (vec (static-runtime-bindings runtime-state graph-id)) dynamic)
+           declared (cenv/declare-child network base-env child-id bindings)]
+       {:net (runner/completed-network
+              (runner/run-network (:props declared) (:net declared)))
+        :env child-id
+        :props (:props declared)}))))
 
 (defn settle-application-props
   [program-net current-props]
-  (let [props (vec (distinct (concat (retained-application-props program-net)
-                                     current-props)))]
-    (-> program-net
-        (nb/run-propagators props)
-        (nb/run-propagators props))))
+  (let [props (vec (distinct current-props))
+        once (runner/completed-network
+              (runner/run-network props program-net))]
+    (runner/completed-network (runner/run-network props once))))
 
 (defn refresh-semantic-graph
   "Project the current compiled block receipts on demand for tracing."
@@ -389,8 +356,11 @@
         network (-> (:program/net state)
                     (nb/ensure-cell graph-id)
                     (nb/seed-cell graph-id graph))
-        network (nb/run-propagators
-                 network (nb/neighbor-propagator-ids network graph-id))]
+        network
+        (runner/completed-network
+         (runner/run-network
+          (nb/neighbor-propagator-ids network graph-id)
+          network))]
     (assoc state :program/net network :program/graph graph :graph graph)))
 
 (defn compile-program-form
@@ -410,7 +380,6 @@
           top-level-trace? (trace-source? source)
           graph-id (runtime-graph-id)
           program-net-input (-> (:program/net state)
-                                expose-application-boundary-outputs
                                 (nb/ensure-cell (boundary-outbox-id))
                                 (nb/install-cell graph-id
                                                  (:graph state)
@@ -431,7 +400,9 @@
                       :block/premise-context premise-context
                       :seed [:runtime/block (:order block) (:epoch block)]
                       :reuse-existing-bindings? reuse-existing-bindings?}))
-          program-net0 (nb/run-propagators (:net compiled) (:props compiled))
+          program-net0
+          (runner/completed-network
+           (runner/run-network (:props compiled) (:net compiled)))
           program-net2 (if (and needs-live-graph?
                                 (not top-level-trace?))
                          (let [graph* (namespace-graph
@@ -445,10 +416,11 @@
                                              graph*)
                                             :source source)
                                [tasks program-net1]
-                               (core/eval-cells [(message graph-id graph)]
-                                                (nb/ensure-cell program-net0
-                                                                graph-id))]
-                           (core/run-tasks tasks program-net1))
+                               (cell-evaluator/evaluate-all
+                                [(message graph-id graph)]
+                                (nb/ensure-cell program-net0 graph-id))]
+                           (runner/completed-network
+                            (runner/run-network tasks program-net1)))
                          program-net0)
           program-net (application-settler program-net2 (:props compiled))
           [compiled program-net]
@@ -510,41 +482,45 @@
   [compiled program-net]
   (boolean
    (some (fn [app-id]
-           (let [application (net/network-cell-strongest program-net app-id)
-                 operator-id (obj/slot-value
-                              application
-                              compiler/application-operator-cell-slot)]
-             (or (nil? operator-id)
-                 (value/unusable?
-                  (net/network-cell-strongest program-net operator-id)))))
+           (let [topology (compiler-app/application-topology program-net app-id)
+                 operator-id (:operator-id topology)]
+             (cond
+               (nil? topology)
+               true
+
+               (nil? operator-id)
+               true
+
+               :else
+               (value/unusable?
+                (net/network-cell-strongest program-net operator-id)))))
          (:applications compiled))))
 
 (defn- repair-application-operator
   [state app-id]
   (let [program-net (:program/net state)
-        application (net/network-cell-strongest program-net app-id)
-        operator-ast (obj/slot-value
-                      application
-                      compiler/application-operator-ast-slot)
-        operator-id (obj/slot-value
-                     application
-                     compiler/application-operator-cell-slot)
-        sym (when (= :symbol (ast/type operator-ast))
-              (ast/name operator-ast))
+        topology (compiler-app/application-topology program-net app-id)
+        operator-id (:operator-id topology)
+        sym (get (cenv/binding-names program-net) operator-id)
         resolved-id (when sym
                       (cenv/resolve-binding-id program-net
                                                (:program/env state)
                                                sym))]
-    (if (and operator-id
-             resolved-id
-             (not= operator-id resolved-id)
-             (value/unusable?
-              (net/network-cell-strongest program-net operator-id))
-             (not (value/unusable?
-                   (net/network-cell-strongest program-net resolved-id))))
+    (cond
+      (and operator-id
+           resolved-id
+           (not= operator-id resolved-id)
+           (value/unusable?
+            (net/network-cell-strongest program-net operator-id))
+           (not (value/unusable?
+                 (net/network-cell-strongest program-net resolved-id))))
       (let [[prop-id installed]
             ((stdlib-prop/id resolved-id operator-id) program-net)]
-        (assoc state :program/net (nb/run-propagators installed [prop-id])))
+        (assoc state :program/net
+               (runner/completed-network
+                (runner/run-network [prop-id] installed))))
+
+      :else
       state)))
 
 (defn repair-unresolved-application-operators
