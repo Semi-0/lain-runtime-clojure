@@ -18,6 +18,12 @@ The existing one-time Lain tracer execution/disposal test remains supported.
 
 ## Timing limitation
 
+The compiler follow-up now filters lexical declaration deltas before effect
+construction and collects cell changes in one scan. A debugger reproduction of
+the cyclic two-node case completed in 2.30 seconds with each node expanded once.
+`trace-cycle-test` covers quiescence, both returned edges, and source-network
+isolation. The earlier timing failure below describes the pre-fix baseline.
+
 An exploratory end-to-end Lain trace of a two-node cyclic traversal exceeded the
 three-second individual-test limit. The equivalent graph constructed with an
 ordinary output boundary also exceeded that limit using the previously
