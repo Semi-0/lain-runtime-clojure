@@ -4,7 +4,7 @@
          :git/sha "12112d2bd937dd968f143bcd85f9656ed026ddb3"}
         io.github.Semi-0/lain-compiler
         {:git/url "https://github.com/Semi-0/lain-compiler.git"
-         :git/sha "349c2069dd601d79b52efe98be56cc68f615724d"}
+         :git/sha "fcffabb0ebca527b99c9a0e95617dd8867124367"}
         meander/epsilon {:mvn/version "0.0.650"}}
  :aliases {:test {:extra-paths ["test" "dev"]
                   :main-opts ["-m" "run-tests"]}
