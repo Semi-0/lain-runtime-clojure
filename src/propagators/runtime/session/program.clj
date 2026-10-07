@@ -540,6 +540,7 @@
   [state]
   (let [epoch (inc (or (:program/epoch state) 0))
         source-blocks (source-blocks state)
+        root (state/runtime-root (runtime-base-net))
         base (assoc state
                     :program/net (nb/install-cell
                                   (net/assoc-net-dict-entry
@@ -547,14 +548,14 @@
                                     (seed-program-blocks
                                      state
                                      (seed-program-instances state
-                                                             (runtime-base-net)))
+                                                             (:net root)))
                                     (boundary-outbox-id))
                                    :program/epoch
                                    epoch)
                                   (runtime-graph-id)
                                   (semantic-trace/graph-union (empty-graph))
                                   (semantic-trace/graph-union (empty-graph)))
-                    :program/env (runtime-compiler-env)
+                    :program/env (:env root)
                     :program/graph (empty-graph)
                     :program/results {}
                     :program/epoch epoch

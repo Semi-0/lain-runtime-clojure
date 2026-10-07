@@ -1,12 +1,16 @@
 (ns propagators.runtime.inspection.semantic-graph
   "Pure semantic graph construction and runtime value annotation."
   (:require [propagators.compiler.lowering.application :as application]
+            [propagators.compiler.lowering.application-ports :as ports]
             [clojure.edn :as edn]
             [clojure.set :as set]
             [propagators.runtime.inspection.semantic-support :as demo]
             [propagators.infra.cells.value :as value]
             [propagators.compiler.language.ast :as ast]
             [propagators.compiler.model.closure-value :as closure-value]
+            [propagators.compiler.model.env :as env]
+            [propagators.compiler.operators.versioned-definition :as definition]
+            [propagators.infra.gur :as gur]
             [propagators.infra.datastructures.compound-object :as obj]
             [propagators.infra.ids :as ids]
             [propagators.infra.network :as net]))
@@ -25,10 +29,22 @@
       (and (vector? slot-key)
            (internal-slot-keyword? (first slot-key)))))
 
+(defn- environment-collections [network]
+  (let [frames (into (set (keys (:frames (net/network-dict-entry network env/lexical-topology-key))))
+                     (keep (fn [[key _]] (when (= :frame (first key)) (second key))))
+                     (get (net/network-dict-entry network gur/name-bindings-key)
+                          env/lexical-topology-scope {}))
+        descriptors (mapcat (fn [frame]
+                              (mapcat keys (vals (obj/accessor-declarations-for network frame))))
+                            frames)]
+    (into frames descriptors)))
+
 (defn- declaration-records
   [n]
-  (vec
+  (let [internal (environment-collections n)]
+   (vec
    (for [collection-id (keys (net/net-env n))
+         :when (not (contains? internal collection-id))
          :let [declarations (merge-with merge
                                         (obj/slot-declarations-for n collection-id)
                                         (obj/accessor-declarations-for n collection-id))]
@@ -37,7 +53,7 @@
          parent-id (keys parents)]
      {:collection-id collection-id
       :slot-key slot-key
-      :parent-id parent-id})))
+      :parent-id parent-id}))))
 
 (defn- label
   [labels id]
@@ -58,7 +74,7 @@
   [v]
   (when-not (value/unusable? v)
     (let [s (cond
-              (closure-value/closure-info? v) (str ":: " (pr-str (closure-value/closure-inputs v)))
+              (closure-value/closure-info? v) (str "network " (pr-str (closure-value/closure-inputs v)))
               (net/network? v) "network"
               :else (demo/display-name v))]
       (if (< 200 (count s))
@@ -262,22 +278,50 @@
             [state _] (ensure-semantic-node state entry)]
         [state entry]))))
 
-(defn- closure-value
-  [n {:keys [operator-cell]}]
+(defn- closure-inspection
+  [n {:keys [operator-cell arg-cells output-id] :as app}]
   (let [v (net/network-cell-strongest n operator-cell)
         declaration
         (application/callable-declaration v)]
-    (when (closure-value/closure-info? declaration)
-      declaration)))
+    (if (closure-value/closure-info? declaration)
+      {:declaration declaration :application app}
+      (let [calls (definition/active-call-topologies n operator-cell arg-cells output-id)]
+        (when (= 1 (count calls))
+          (let [call (first calls)
+                declaration (application/callable-declaration
+                             (net/network-cell-strongest n (:operator-id call)))]
+            (when (closure-value/closure-info? declaration)
+              {:declaration declaration
+               :application (assoc app :application-id (:application-id call))})))))))
+
+(defn- member-output-cells
+  [network {:keys [application-id arg-cells output-id]}]
+  (let [members (:member-outputs
+                 (ports/application-ports network
+                                          {:application-id application-id
+                                           :result-id output-id}))
+        arguments (set arg-cells)
+        graph (net/net-graph network)]
+    (mapcat
+     (fn [port-id]
+       (let [targets (->> (:outputs (get graph port-id))
+                          (mapcat #(:outputs (get graph %)))
+                          (filter arguments)
+                          distinct)]
+         (if (seq targets) targets [port-id])))
+     members)))
 
 (defn- closure-env
-  [n labels {:keys [app-id arg-cells output-id]} closure-info]
+  [n labels {:keys [app-id arg-cells output-id] :as app} closure-info]
   (let [inputs (closure-value/closure-inputs closure-info)
-        outputs (output-symbols (closure-value/closure-output closure-info))]
+        outputs (output-symbols (closure-value/closure-output closure-info))
+        returned (set (member-output-cells n app))]
     (merge
      (into {}
            (map (fn [[sym arg-id]]
-                  [sym {:key [:closure app-id :input sym]
+                  [sym {:key (if (contains? returned arg-id)
+                               [:cell arg-id]
+                               [:closure app-id :input sym])
                         :label (demo/display-name sym)
                         :value (net/network-cell-strongest n arg-id)}]))
            (map vector inputs (take (count inputs) arg-cells)))
@@ -289,14 +333,16 @@
            (map vector outputs (drop (count inputs) arg-cells))))))
 
 (defn- add-input-bindings
-  [state labels {:keys [app-id arg-cells]} closure-info]
+  [state network labels {:keys [app-id arg-cells] :as app} closure-info]
   (reduce
    (fn [state [sym arg-id]]
-     (add-edge state
+     (if (some #{arg-id} (member-output-cells network app))
+       state
+       (add-edge state
                [:cell arg-id]
                (label labels arg-id)
                [:closure app-id :input sym]
-               (demo/display-name sym)))
+               (demo/display-name sym))))
    state
    (map vector (closure-value/closure-inputs closure-info) arg-cells)))
 
@@ -315,12 +361,12 @@
      (map vector outputs (drop input-count arg-cells)))))
 
 (defn- closure-output-cells
-  [{:keys [arg-cells output-id]} closure-info]
+  [network {:keys [arg-cells output-id] :as app} closure-info]
   (let [input-count (count (closure-value/closure-inputs closure-info))
         outputs (vec (drop input-count arg-cells))]
     (if (seq outputs)
       outputs
-      [output-id])))
+      (vec (distinct (into [output-id] (member-output-cells network app)))))))
 
 (defn- closure-call-label
   [labels {:keys [operator-label operator-cell]}]
@@ -340,7 +386,7 @@
   [state n labels {:keys [app-id arg-cells] :as app} closure-info]
   (let [input-count (count (closure-value/closure-inputs closure-info))
         input-cells (take input-count arg-cells)
-        output-cells (closure-output-cells app closure-info)
+        output-cells (closure-output-cells n app closure-info)
         call-key [:call app-id]
         call-label (closure-call-label labels app)
         [state call-node-id] (demo/semantic-node state call-key call-label)
@@ -369,7 +415,7 @@
 
 (defn- add-inlined-closure-semantics
   [state n labels app closure-info]
-  (let [state (add-input-bindings state labels app closure-info)
+  (let [state (add-input-bindings state n labels app closure-info)
         env (closure-env n labels app closure-info)
         [state _] (add-expr-semantics state env (:app-id app) [:body]
                                       (closure-value/closure-body closure-info))]
@@ -395,8 +441,10 @@
   (let [labels (demo/semantic-base-labels compiled n)
         state (reduce
                (fn [state app]
-                 (if-let [closure-info (closure-value n app)]
-                   (add-collapsed-closure-semantics state n labels app closure-info)
+                 (if-let [inspection (closure-inspection n app)]
+                   (add-collapsed-closure-semantics state n labels
+                                                  (:application inspection)
+                                                  (:declaration inspection))
                    (demo/add-application-semantic state labels app)))
                {:next-id 0
                 :key->id {}

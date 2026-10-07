@@ -80,7 +80,7 @@
         (command
          (request
           "00000000-0000-0000-0000-000000000203" 1 0
-          "(def stopped)"))
+          "(define stopped)"))
         (let [epoch-key (or (:clock/source-id subscription) subscription-id)
               epoch-after-retraction (get-in @session
                                              [:clock/epochs epoch-key])]

@@ -68,7 +68,7 @@
   [network]
   (let [env-id (stable-node-id :compiler-2 :runtime :root-environment)
         bindings ((requiring-resolve
-                   'propagators.compiler.operators.behavior/behavior-tms-bindings))
+                   'propagators.compiler.main/tms-bindings))
         declared (compiler-env/declare-root network env-id bindings)]
     (assoc declared
            :net (runner/completed-network

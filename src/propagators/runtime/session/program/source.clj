@@ -19,7 +19,7 @@
       nil)))
 
 (def ^:private declaration-heads
-  '#{def def-cell def-cells def-net def-constraint behavior behavior-cell})
+  '#{define})
 
 (def ^:private boundary-effect-heads
   '#{be:block be:event-block-at translate xr-io io:xr

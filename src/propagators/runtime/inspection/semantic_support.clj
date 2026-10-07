@@ -16,11 +16,7 @@
             [propagators.infra.network-builder :as nb]))
 
 (def source
-  "(let-cell [inc-local]
-     (<-> inc-local
-          (:: [x]
-            (+ x 1)))
-     (inc-local 5))")
+  "(let-cell [inc-local] (<-> inc-local (network [x] (+ x 1))) (inc-local 5))")
 
 (defn display-name [x]
   (cond
@@ -56,7 +52,7 @@
 (defn closure-labels [n]
   (into {}
         (map (fn [[id closure-info]]
-               [id (str ":: "
+               [id (str "network "
                         (pr-str (closure-value/closure-inputs closure-info)))]))
         (network-closure-values n)))
 

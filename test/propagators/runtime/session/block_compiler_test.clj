@@ -13,9 +13,9 @@
 
 (deftest definition-and-application-rewriting-is-idempotent
   (let [context (premise/premise-context :block 0)
-        forms ["(def-net f [x] [out] (-> x out))"
-               "(def f (cell-expr [x] (+ x 1)))"
-               "(def-constraint same [x y] (<-> x y))"
+        forms ["(define f (network [x out] (-> x out) (list out)))"
+               "(define f (network [x] (+ x 1)))"
+               "(define same (network [x y] (<-> x y) (list x y)))"
                "(+ 1 2)"]]
     (doseq [source forms
             :let [once (block-compiler/rewrite-expr
@@ -28,8 +28,7 @@
     (runtime/commit-version!
      session
      (request "00000000-0000-0000-0000-000000000001"
-              (str "(def outer (network [] [out] "
-                   "(def inner 1) (-> 2 out)))")))
+              "(define outer (network () (define inner 1) 2))"))
     (let [candidates (vals (net/network-dict-entry
                             (:program/net @session) definition/candidates-key))]
       (is (= ['outer] (mapv :candidate/name candidates))))))
@@ -49,15 +48,15 @@
 
 (deftest def-net-lowering-records-signature
   (assert-callable-signature
-   "(def-net f [x] [out] (-> x out))"
-   {:inputs 1 :outputs 1 :implicit? false}))
+   "(define f (network [x out] (-> x out) (list out)))"
+   {:inputs 2 :outputs 0 :implicit? true}))
 
 (deftest cell-expression-lowering-records-signature
   (assert-callable-signature
-   "(def f (cell-expr [x] (+ x 1)))"
+   "(define f (network [x] (+ x 1)))"
    {:inputs 1 :outputs 0 :implicit? true}))
 
 (deftest constraint-lowering-records-signature
   (assert-callable-signature
-   "(def-constraint f [x y] (<-> x y))"
+   "(define f (network [x y] (<-> x y) (list x y)))"
    {:inputs 2 :outputs 0 :implicit? true}))

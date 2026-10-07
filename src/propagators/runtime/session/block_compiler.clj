@@ -6,6 +6,7 @@
   records dependency metadata on that result, and returns the raw binding."
   (:require [meander.epsilon :as m]
             [propagators.compiler.cps-core :as compiler]
+            [propagators.compiler.compiler.declarations :as declarations]
             [propagators.compiler.language.ast :as ast]
             [propagators.compiler.model.closure-value :as closure-value]
             [propagators.compiler.model.env :as env]
@@ -169,8 +170,10 @@
    (fn [state binding]
      (let [[state public]
            (definition/declare-candidate (:compiler state) state name binding
-                                         signature explicit)]
-       (cps/continue k state public)))))
+                                         signature explicit)
+           [declared receipt]
+           (declarations/declare-definition-receipt state binding public)]
+       (cps/continue k declared receipt)))))
 
 (defn definition-term-operator [name signature explicit]
   (operator-value/operator-closure
@@ -263,7 +266,6 @@
 (defn- network-signature [expr]
   (case (ast/type expr)
     :network (callable-signature (ast/inputs expr) [] true)
-    :compound (callable-signature (ast/inputs expr) (ast/output expr) false)
     nil))
 
 (defn- body-signature [body]
@@ -277,35 +279,13 @@
 
 (defn- rewrite-definition [context expr]
   (let [name (ast/name expr)]
-    (case (ast/type expr)
-      :def-net
-      (definition-term
-       name
-       (callable-signature (ast/inputs expr) (ast/output expr) false)
-       nil
-       (ast/compound {:inputs (ast/inputs expr) :output (ast/output expr)}
-                     (rewrite-expr* context false (ast/body expr))))
-
-      :def-constraint
-      (let [inputs (ast/inputs expr)
-            body (rewrite-expr* context false (ast/body expr))
-            result (if-let [last-input (peek inputs)]
-                     (ast/sequence* body (ast/sym last-input))
-                     body)]
-        (definition-term name (callable-signature inputs [] true) nil
-                         (ast/network inputs result)))
-
-      :def
-      (if-let [body (ast/body expr)]
-        (let [explicit (explicit-premise body)]
-          (definition-term name
-                           (or (body-signature body)
-                               {:inputs 0 :outputs 0 :implicit? true
-                                :scalar? true})
-                           explicit
-                           (rewrite-expr* context false body)))
-        ;; Storage declarations remain ordinary cells.
-        expr))))
+    (if-let [body (ast/body expr)]
+      (definition-term name
+                       (or (body-signature body)
+                           {:inputs 0 :outputs 0 :implicit? true :scalar? true})
+                       (explicit-premise body)
+                       (rewrite-expr* context false body))
+      expr)))
 
 (defn rewrite-expr* [context block-level? expr]
   (m/match (ast/type expr)
@@ -325,11 +305,6 @@
                     (rewrite-expr* context block-level? (ast/body expr)))
     :network (ast/network (ast/inputs expr)
                           (rewrite-expr* context false (ast/body expr)))
-    :compound (ast/compound {:inputs (ast/inputs expr)
-                             :output (ast/output expr)}
-                            (rewrite-expr* context false (ast/body expr)))
-    :def-net (if block-level? (rewrite-definition context expr) expr)
-    :def-constraint (if block-level? (rewrite-definition context expr) expr)
     :def (if block-level? (rewrite-definition context expr) expr)
     _ expr))
 

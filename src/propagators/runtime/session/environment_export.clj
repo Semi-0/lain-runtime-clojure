@@ -1,7 +1,7 @@
 (ns propagators.runtime.session.environment-export
   "Pure S-expression export of versioned compiler-2 definitions.
 
-  The exporter rebuilds ordinary `def`/`def-cell`/`def-net` forms.  Private
+  The exporter rebuilds ordinary `define`/`network` forms.  Private
   candidates are invoked through ordinary premise closures; no runtime router,
   generated NodeId, scheduler state, or JVM function is serialized."
   (:require [clojure.string :as str]
@@ -10,7 +10,7 @@
             [propagators.infra.datastructures.tms :as tms]
             [propagators.infra.network :as net]))
 
-(def definition-heads '#{def def-cell def-net def-constraint})
+(def definition-heads '#{define})
 
 (defn definition-form?
   [form]
@@ -20,24 +20,10 @@
   [form offset]
   (vec (drop offset form)))
 
-(defn- closure-signature
-  [closure]
-  (when (seq? closure)
-    (case (first closure)
-      network (let [[_ inputs maybe-outputs & body] closure
-                    explicit? (vector? maybe-outputs)]
-                {:inputs (vec inputs)
-                 :outputs (if explicit? (vec maybe-outputs) [])
-                 :implicit? (not explicit?)
-                 :body (if explicit?
-                         (vec body)
-                         (vec (cons maybe-outputs body)))})
-      cell (let [[_ inputs & body] closure]
-             {:inputs (vec inputs)
-              :outputs []
-              :implicit? true
-              :body (vec body)})
-      nil)))
+(defn- closure-signature [closure]
+  (when (and (seq? closure) (= 'network (first closure)))
+    (let [[_ inputs & body] closure]
+      {:inputs (vec inputs) :outputs [] :implicit? true :body (vec body)})))
 
 (defn- explicit-premise
   [candidate]
@@ -50,48 +36,19 @@
      :premise (nth candidate 2)
      :epoch (nth candidate 3)}))
 
-(defn definition-info
-  [form]
+(defn definition-info [form]
   (when (definition-form? form)
-    (let [head (first form)
-          name (second form)]
-      (case head
-        def-net
-        (let [[_ _ inputs outputs & body] form]
-          {:head head :name name :callable? true
-           :inputs (vec inputs) :outputs (vec outputs) :implicit? false
-           :candidate (list* 'network inputs outputs body)})
-
-        def-cell
-        (let [[_ _ body] form
-              signature (closure-signature body)]
-          (cond
-            signature
-            (merge {:head head :name name :callable? true :candidate body}
-                   (select-keys signature [:inputs :outputs :implicit?]))
-
-            (some? body)
-            {:head head :name name :scalar? true :candidate body}
-
-            :else
-            {:head head :name name :storage? true}))
-
-        def-constraint
-        (let [[_ _ applicants & body] form]
-          {:head head :name name :callable? true
-           :inputs (vec applicants) :outputs [] :implicit? true
-           :candidate (list* 'cell-expr applicants
-                             (concat body [(last applicants)]))})
-
-        def
-        (let [[_ _ body] form
-              explicit (explicit-premise body)
-              signature (closure-signature (or (:closure explicit) body))]
-          (if signature
-            (merge {:head head :name name :callable? true
-                    :candidate body :explicit explicit}
-                   (select-keys signature [:inputs :outputs :implicit?]))
-            {:head head :name name :scalar? true :candidate body}))))))
+    (let [[head name body] form
+          explicit (explicit-premise body)
+          signature (closure-signature (or (:closure explicit) body))]
+      (cond
+        signature
+        (merge {:head head :name name :callable? true :candidate body :explicit explicit}
+               (select-keys signature [:inputs :outputs :implicit?]))
+        (= 2 (count form))
+        {:head head :name name :storage? true}
+        :else
+        {:head head :name name :scalar? true :candidate body}))))
 
 (defn- safe-token
   [x]
@@ -134,56 +91,6 @@
   [entries]
   (apply max-key :version entries))
 
-(defn- normalized-arguments
-  [public-inputs candidate input-placeholders]
-  (let [required (count (:inputs candidate))
-        available (vec public-inputs)
-        missing (max 0 (- required (count available)))]
-    {:arguments (vec (take required (concat available input-placeholders)))
-     :missing missing
-     :extra (max 0 (- (count available) required))}))
-
-(defn- wrapper-definition
-  [candidate public-inputs output-position]
-  (let [private (private-symbol candidate (:name candidate) :candidate)
-        wrapper (private-symbol candidate (:name candidate) :gate output-position)
-        wrapper-out (private-symbol candidate (:name candidate) :gate-output
-                                    output-position)
-        candidate-outputs
-        (mapv #(private-symbol candidate (:name candidate) :private-output %)
-              (range (count (:outputs candidate))))
-        placeholders
-        (mapv #(private-symbol candidate (:name candidate) :missing-input %)
-              (range (max 0 (- (count (:inputs candidate))
-                               (count public-inputs)))))
-        {:keys [arguments]}
-        (normalized-arguments public-inputs candidate placeholders)
-        candidate-call
-        (if (:implicit? candidate)
-          (list* private arguments)
-          (list* private (concat arguments candidate-outputs)))
-        wrapper-body
-        (if (:implicit? candidate)
-          [candidate-call]
-          [(list* 'let-cell candidate-outputs
-                  [candidate-call
-                   (list '-> (nth candidate-outputs output-position)
-                         wrapper-out)])])
-        closure (if (:implicit? candidate)
-                  (list* 'cell (vec (cons private public-inputs)) wrapper-body)
-                  (list* 'network (vec (cons private public-inputs))
-                         [wrapper-out] wrapper-body))
-        premise (candidate-premise candidate (:name candidate))
-        gated (list 'premise-closure closure premise 0)]
-    {:private private
-     :wrapper wrapper
-     :placeholders placeholders
-     :definition (list 'def wrapper gated)
-     :call (fn [public-out]
-             (if (:implicit? candidate)
-               (list '-> (list* wrapper (cons private public-inputs)) public-out)
-               (list* wrapper (concat [private] public-inputs [public-out]))))}))
-
 (defn- callable-warnings
   [candidate current]
   (cond-> []
@@ -212,7 +119,7 @@
   (let [current (current-entry entries)
         private-forms
         (mapv (fn [candidate]
-                (list 'def
+                (list 'define
                       (private-symbol candidate (:name candidate) :candidate)
                       (:candidate candidate)))
               entries)]
@@ -234,7 +141,7 @@
   (let [current (current-entry entries)
         private-forms
         (mapv (fn [candidate]
-                (list 'def
+                (list 'define
                       (private-symbol candidate (:name candidate) :candidate)
                       (:candidate candidate)))
               entries)]

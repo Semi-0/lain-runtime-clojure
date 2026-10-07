@@ -679,11 +679,7 @@
 
 (deftest compiler-2-known-tms-operator-declares-primitive-topology
   (let [compiled (main/compile-source-with-behavior-tms
-                  "(let-cell [out]
-                     (def premise :static/premise)
-                     (def epoch 0)
-                     (premise-retract premise epoch out)
-                     out)")
+                  "(let-cell [out] (define premise :static/premise) (define epoch 0) (premise-retract premise epoch out) out)")
         applications (compiler-app/application-topologies (:net compiled))
         n (run-compiled compiled)]
     (is (= 1 (count applications)))
@@ -696,13 +692,7 @@
 ;; See propagators.infra/doc/compiler-2-progress-and-priorities.md.
 #_(deftest compiler-2-main-can-define-behavior-producing-network
   (let [compiled (main/compile-source-with-behavior-tms
-                  "(let-cell [a b out]
-                     (def-net make-point [t v] [out]
-                       (behavior-point t v out))
-                     (make-point 6 2 a)
-                     (make-point 6 7 b)
-                     (<-> (be:+ a b) out)
-                     out)"
+                  "(let-cell [a b out] (define make-point (network [t v out] (-> (behavior-point t v out) out) (list out))) (make-point 6 2 a) (make-point 6 7 b) (<-> (be:+ a b) out) out)"
                   {:net (behavior-tms-protocol-net)})
         n (run-compiled compiled)]
     (is (= 9 (behavior-current-value n (:cell compiled))))
@@ -711,13 +701,7 @@
 
 #_(deftest compiler-2-main-can-build-behavior-with-compiler-closure-reducer
   (let [compiled (main/compile-source-with-behavior-tms
-                  "(let-cell [events out]
-                     (def-net retain-event [acc update] [out]
-                       (behavior-add-event acc update out))
-                     (behavior-event 6 2 events)
-                     (behavior-event 8 3 events)
-                     (behavior events retain-event (behavior-empty-state) out)
-                     out)"
+                  "(let-cell [events out] (define retain-event (network [acc update out] (-> (behavior-add-event acc update out) out) (list out))) (behavior-event 6 2 events) (behavior-event 8 3 events) (behavior events retain-event (behavior-empty-state) out) out)"
                   {:net (behavior-tms-protocol-net)})
         n (run-compiled compiled)]
     (is (= 3 (behavior-current-value n (:cell compiled))))
@@ -727,18 +711,7 @@
 
 #_(deftest compiler-2-behavior-merge-can-use-low-level-operators
   (let [compiled (main/compile-source-with-behavior-tms
-                  "(let-cell [events out]
-                     (def-net retain-event-low [acc update] [out]
-                       (let-cell [known tick value next]
-                         (behavior-state-events acc known)
-                         (behavior-update-tick update tick)
-                         (behavior-update-value update value)
-                         (behavior-assoc-event known tick value next)
-                         (behavior-state-from-events next out)))
-                     (behavior-event 6 2 events)
-                     (behavior-event 8 3 events)
-                     (behavior events retain-event-low (behavior-empty-state) out)
-                     out)"
+                  "(let-cell [events out] (define retain-event-low (network [acc update out] (-> (let-cell [known tick value next] (behavior-state-events acc known) (behavior-update-tick update tick) (behavior-update-value update value) (behavior-assoc-event known tick value next) (behavior-state-from-events next out)) out) (list out))) (behavior-event 6 2 events) (behavior-event 8 3 events) (behavior events retain-event-low (behavior-empty-state) out) out)"
                   {:net (behavior-tms-protocol-net)})
         n (run-compiled compiled)]
     (is (= 3 (behavior-current-value n (:cell compiled))))
@@ -748,20 +721,7 @@
 
 #_(deftest compiler-2-behavior-cell-can-use-slot-based-merge-closure
   (let [compiled (main/compile-source-with-behavior-tms
-                  "(let-cell [events retained out]
-                     (def-net retain-latest-slot [acc next] [out]
-                       (let-cell [events* slot value next-events full]
-                         (behavior-state-events acc events*)
-                         (p:slot :slot slot next)
-                         (p:slot :value value next)
-                         (behavior-assoc-event events* slot value next-events)
-                         (behavior-state-from-events next-events full)
-                         (behavior-retain-last full 1 out)))
-                     (behavior-event 6 2 events)
-                     (behavior-event 8 3 events)
-                     (behavior-cell events (behavior-empty-state) retain-latest-slot retained)
-                     (<-> (be:+ retained retained) out)
-                     out)"
+                  "(let-cell [events retained out] (define retain-latest-slot (network [acc next out] (-> (let-cell [events* slot value next-events full] (behavior-state-events acc events*) (p:slot :slot slot next) (p:slot :value value next) (behavior-assoc-event events* slot value next-events) (behavior-state-from-events next-events full) (behavior-retain-last full 1 out)) out) (list out))) (behavior-event 6 2 events) (behavior-event 8 3 events) (behavior-cell events (behavior-empty-state) retain-latest-slot retained) (<-> (be:+ retained retained) out) out)"
                   {:net (behavior-tms-protocol-net)})
         n (run-compiled compiled)]
     (is (= 6 (behavior-current-value n (:cell compiled))))
@@ -770,17 +730,7 @@
 
 #_(deftest compiler-2-behavior-closure-reducer-can-retain-latest-in-chain
   (let [compiled (main/compile-source-with-behavior-tms
-                  "(let-cell [events retained out]
-                     (def-net retain-latest [acc update] [out]
-                       (let-cell [full]
-                         (behavior-add-event acc update full)
-                         (behavior-retain-last full 1 out)))
-                     (behavior-event 6 2 events)
-                     (behavior-event 8 3 events)
-                     (behavior-event 10 5 events)
-                     (behavior events retain-latest (behavior-empty-state) retained)
-                     (<-> (be:+ retained retained) out)
-                     out)"
+                  "(let-cell [events retained out] (define retain-latest (network [acc update out] (-> (let-cell [full] (behavior-add-event acc update full) (behavior-retain-last full 1 out)) out) (list out))) (behavior-event 6 2 events) (behavior-event 8 3 events) (behavior-event 10 5 events) (behavior events retain-latest (behavior-empty-state) retained) (<-> (be:+ retained retained) out) out)"
                   {:net (behavior-tms-protocol-net)})
         n (run-compiled compiled)]
     (is (= 10 (behavior-current-value n (:cell compiled))))
@@ -789,17 +739,7 @@
 
 #_(deftest compiler-2-behavior-closure-reducer-can-retain-window-in-chain
   (let [compiled (main/compile-source-with-behavior-tms
-                  "(let-cell [events retained out]
-                     (def-net retain-window [acc update] [out]
-                       (let-cell [full]
-                         (behavior-add-event acc update full)
-                         (behavior-retain-last full 2 out)))
-                     (behavior-event 6 2 events)
-                     (behavior-event 8 3 events)
-                     (behavior-event 10 5 events)
-                     (behavior events retain-window (behavior-empty-state) retained)
-                     (<-> (be:+ retained retained) out)
-                     out)"
+                  "(let-cell [events retained out] (define retain-window (network [acc update out] (-> (let-cell [full] (behavior-add-event acc update full) (behavior-retain-last full 2 out)) out) (list out))) (behavior-event 6 2 events) (behavior-event 8 3 events) (behavior-event 10 5 events) (behavior events retain-window (behavior-empty-state) retained) (<-> (be:+ retained retained) out) out)"
                   {:net (behavior-tms-protocol-net)})
         n (run-compiled compiled)]
     (is (= 10 (behavior-current-value n (:cell compiled))))
@@ -809,17 +749,7 @@
 
 #_(deftest compiler-2-behavior-cell-can-retain-window-in-chain
   (let [compiled (main/compile-source-with-behavior-tms
-                  "(let-cell [events retained out]
-                     (def-net retain-window [acc next] [out]
-                       (let-cell [full]
-                         (behavior-add-event acc next full)
-                         (behavior-retain-last full 2 out)))
-                     (behavior-event 6 2 events)
-                     (behavior-event 8 3 events)
-                     (behavior-event 10 5 events)
-                     (behavior-cell events (behavior-empty-state) retain-window retained)
-                     (<-> (be:+ retained retained) out)
-                     out)"
+                  "(let-cell [events retained out] (define retain-window (network [acc next out] (-> (let-cell [full] (behavior-add-event acc next full) (behavior-retain-last full 2 out)) out) (list out))) (behavior-event 6 2 events) (behavior-event 8 3 events) (behavior-event 10 5 events) (behavior-cell events (behavior-empty-state) retain-window retained) (<-> (be:+ retained retained) out) out)"
                   {:net (behavior-tms-protocol-net)})
         n (run-compiled compiled)]
     (is (= 10 (behavior-current-value n (:cell compiled))))
@@ -828,15 +758,7 @@
            (behavior-records (net/network-cell-content n (:cell compiled)))))))
 
 #_(deftest compiler-2-behavior-syntax-latest-and-last-are-behaviors
-  (let [source "(let-cell [events retained out]
-                  (def-net retain-all [acc next] [out]
-                    (behavior-add-event acc next out))
-                  (behavior-event 6 2 events)
-                  (behavior-event 8 3 events)
-                  (behavior-event 10 5 events)
-                  (be:behavior-cell events (behavior-empty-state) retain-all retained)
-                  %s
-                  out)"
+  (let [source "(let-cell [events retained out] (define retain-all (network [acc next out] (-> (behavior-add-event acc next out) out) (list out))) (behavior-event 6 2 events) (behavior-event 8 3 events) (behavior-event 10 5 events) (be:behavior-cell events (behavior-empty-state) retain-all retained) %s out)"
         compiled (main/compile-source-with-behavior-tms
                   (format source "(<-> (be:+ (latest retained) (latest retained)) out)")
                   {:net (behavior-tms-protocol-net)})
@@ -853,15 +775,7 @@
              (behavior-records (net/network-cell-content n (:cell compiled))))))))
 
 #_(deftest compiler-2-behavior-prefixed-projections-are-behaviors
-  (let [source "(let-cell [events retained out]
-                  (def-net retain-all [acc next] [out]
-                    (behavior-add-event acc next out))
-                  (behavior-event 6 2 events)
-                  (behavior-event 8 3 events)
-                  (behavior-event 10 5 events)
-                  (behavior-cell events (behavior-empty-state) retain-all retained)
-                  %s
-                  out)"
+  (let [source "(let-cell [events retained out] (define retain-all (network [acc next out] (-> (behavior-add-event acc next out) out) (list out))) (behavior-event 6 2 events) (behavior-event 8 3 events) (behavior-event 10 5 events) (behavior-cell events (behavior-empty-state) retain-all retained) %s out)"
         compile-projection (fn [body]
                              (let [compiled (main/compile-source-with-behavior-tms
                                              (format source body)
@@ -884,13 +798,7 @@
 
 #_(deftest compiler-2-behavior-prefixed-constructor-builds-behavior
   (let [compiled (main/compile-source-with-behavior-tms
-                  "(let-cell [events retained]
-                     (def-net retain-all [acc next] [out]
-                       (behavior-add-event acc next out))
-                     (behavior-event 6 2 events)
-                     (behavior-event 10 5 events)
-                     (be:behavior events retain-all (behavior-empty-state) retained)
-                     (be:latest retained))"
+                  "(let-cell [events retained] (define retain-all (network [acc next out] (-> (behavior-add-event acc next out) out) (list out))) (behavior-event 6 2 events) (behavior-event 10 5 events) (be:behavior events retain-all (behavior-empty-state) retained) (be:latest retained))"
                   {:net (behavior-tms-protocol-net)})
         n (run-compiled compiled)]
     (is (= 5 (behavior-current-value n (:cell compiled))))
@@ -908,15 +816,7 @@
     (is (= [] (behavior-records content)))))
 
 #_(deftest compiler-2-behavior-syntax-history-slices-return-behaviors
-  (let [base-source "(let-cell [events retained out]
-                       (def-net retain-all [acc next] [out]
-                         (behavior-add-event acc next out))
-                       (behavior-event 6 2 events)
-                       (behavior-event 8 3 events)
-                       (behavior-event 10 5 events)
-                       (behavior-cell events (behavior-empty-state) retain-all retained)
-                       %s
-                       out)"
+  (let [base-source "(let-cell [events retained out] (define retain-all (network [acc next out] (-> (behavior-add-event acc next out) out) (list out))) (behavior-event 6 2 events) (behavior-event 8 3 events) (behavior-event 10 5 events) (behavior-cell events (behavior-empty-state) retain-all retained) %s out)"
         compile-slice (fn [body]
                         (let [compiled (main/compile-source-with-behavior-tms
                                         (format base-source body)
@@ -949,40 +849,20 @@
                                     (p:cdr tail pair)
                                     (+ head tail))")
         explicit-net (run-compiled explicit)
-        sugar (compile-source "(let-cell []
-                                 (def pair (cons 1 2))
-                                 (+ (car pair) (cdr pair)))")
+        sugar (compile-source "(let-cell [] (define pair (cons 1 2)) (+ (car pair) (cdr pair)))")
         sugar-net (run-compiled sugar)]
     (is (= 3 (strongest explicit-net (:cell explicit))))
     (is (= 3 (strongest sugar-net (:cell sugar))))))
 
 (deftest compile-2-list-builds-cons-chain
-  (let [compiled (compile-source "(let-cell [xs tail]
-                                    (def xs (list 1 2 3))
-                                    (p:cdr tail xs)
-                                    (+ (p:car xs) (p:car tail)))")
+  (let [compiled (compile-source "(let-cell [xs tail] (define xs (list 1 2 3)) (p:cdr tail xs) (+ (p:car xs) (p:car tail)))")
         n (run-compiled compiled)]
     (is (= 3 (strongest n (:cell compiled))))))
 
 (deftest compile-2-cdr-gated-list-gur-hop-chain
   (testing "compiler-2 structural GUR should use cdr presence as the lazy hop guard"
     (let [compiled
-          (compile-source "(let-cell [xs node1 tail out first rest second]
-                            (def-net inc-list [xs] [out]
-                              (let-cell [head rest mapped-head mapped-rest]
-                                (p:car head xs)
-                                (p:cdr rest xs)
-                                (-> (+ head 1) mapped-head)
-                                (p:cons mapped-head mapped-rest out)
-                                (when rest
-                                  (inc-list rest mapped-rest))))
-                            (p:cons 2 tail node1)
-                            (p:cons 1 node1 xs)
-                            (inc-list xs out)
-                            (p:car first out)
-                            (p:cdr rest out)
-                            (p:car second rest)
-                            (+ (* first 10) second))"
+          (compile-source "(let-cell [xs node1 tail out first rest second] (define inc-list (network [xs out] (-> (let-cell [head rest mapped-head mapped-rest] (p:car head xs) (p:cdr rest xs) (-> (+ head 1) mapped-head) (p:cons mapped-head mapped-rest out) (when rest (inc-list rest mapped-rest))) out) (list out))) (p:cons 2 tail node1) (p:cons 1 node1 xs) (inc-list xs out) (p:car first out) (p:cdr rest out) (p:car second rest) (+ (* first 10) second))"
                           (selected-default-env
                            'p:car 'p:cdr 'p:cons '+ '* '->))
           n (run-compiled compiled)]
@@ -1002,14 +882,7 @@
                            value-syms
                            rest-syms))
         double-list
-        '(def-net double-list [xs] [out]
-           (let-cell [head rest mapped-head mapped-rest]
-             (p:car head xs)
-             (p:cdr rest xs)
-             (-> (* head 2) mapped-head)
-             (p:cons mapped-head mapped-rest out)
-             (when rest
-               (double-list rest mapped-rest))))
+        '(define double-list (network [xs out] (-> (let-cell [head rest mapped-head mapped-rest] (p:car head xs) (p:cdr rest xs) (-> (* head 2) mapped-head) (p:cons mapped-head mapped-rest out) (when rest (double-list rest mapped-rest))) out) (list out)))
         cons-forms
         (mapv (fn [coll tail]
                 (list 'p:cons 1 tail coll))
@@ -1046,7 +919,7 @@
           compiled (compile-source
                     (compile-2-map-chain-source depth)
                     (selected-default-env
-                     'p:car 'p:cdr 'p:cons '+ '* '->))
+                     'p:car 'p:cdr 'p:cons '+ '* '-> 'list))
           n (run-compiled compiled)
           expected (* 2 (long (Math/pow 2 depth)))]
       (is (= expected (strongest n (:cell compiled)))))))
@@ -1059,21 +932,12 @@
     (is (= 8 (strongest n (:cell compiled))))))
 
 (deftest compile-2-exposes-generic-slot-in-network-closure
-  (let [compiled (compile-source "(let-cell [obj out]
-                                    (def-net read-x [coll] [out]
-                                      (p:slot :x coll))
-                                    (p:slot :x 6 obj)
-                                    (read-x obj out)
-                                    (+ out 1))")
+  (let [compiled (compile-source "(let-cell [obj out] (define read-x (network [coll out] (-> (p:slot :x coll) out) (list out))) (p:slot :x 6 obj) (read-x obj out) (+ out 1))")
         n (run-compiled compiled)]
     (is (= 7 (strongest n (:cell compiled))))))
 
 (deftest compile-2-exposes-generic-slot-write-in-network-closure
-  (let [compiled (compile-source "(let-cell [obj]
-                                    (def-net make-x [v] [out]
-                                      (p:slot :x v out))
-                                    (make-x 6 obj)
-                                    (+ (p:slot :x obj) 1))")
+  (let [compiled (compile-source "(let-cell [obj] (define make-x (network [v out] (-> (p:slot :x v out) out) (list out))) (make-x 6 obj) (+ (p:slot :x obj) 1))")
         n (run-compiled compiled)]
     (is (= 7 (strongest n (:cell compiled))))))
 
@@ -1428,56 +1292,40 @@
                  (:inputs node))))))
 
 (deftest compile-2-parser-supports-implicit-output-closures
-  (testing "cell-expr and :: parse as networks while cell is an application"
-    (let [marker (parse "(:: [x] (+ x 1))")
-          named (parse "(cell-expr [x] (+ x 1))")
-          retired (parse "(cell [x] (+ x 1))")]
-      (is (net/network? marker))
-      (is (= :network (ast/type marker)))
-      (is (= :network (obj/slot-value marker ast/type-slot)))
-      (is (= '[x] (ast/inputs marker)))
-      (is (= :apply (ast/type (ast/body marker))))
-      (is (= :network (ast/type named)))
-      (is (= '[x] (ast/inputs named)))
-      (is (= :apply (ast/type retired)))
-      (is (= 'cell (ast/name (ast/operator retired)))))
-    (is (thrown-with-msg? clojure.lang.ExceptionInfo
-                          #":: params must be a vector"
-                          (parse "(:: (+ x 1))")))))
+  (doseq [source ["(network (x) (+ x 1))" "(network [x] (+ x 1))"]]
+    (let [expression (parse source)]
+      (is (net/network? expression))
+      (is (= :network (ast/type expression)))
+      (is (= '[x] (ast/inputs expression)))
+      (is (nil? (ast/output expression)))
+      (is (= :apply (ast/type (ast/body expression))))))
+  (is (thrown? clojure.lang.ExceptionInfo (parse "(cell-expr [x] x)")))
+  (is (thrown? clojure.lang.ExceptionInfo (parse "(:: [x] x)"))))
 
-(deftest compile-2-parser-supports-first-slice-network-syntax
-  (testing "network and def-net parse output vectors over the existing closure path"
-    (let [network-ast (parse "(network [x] [out] (+ x 1))")
-          def-net-ast (parse "(def-net pair [x] [same next] (+ x 1))")]
-      (is (= :compound (ast/type network-ast)))
-      (is (= '[x] (ast/inputs network-ast)))
-      (is (= '[out] (ast/output network-ast)))
-      (is (= :def-net (ast/type def-net-ast)))
-      (is (= 'pair (ast/name def-net-ast)))
-      (is (= '[same next] (ast/output def-net-ast))))))
+(deftest compile-2-parser-supports-functional-network-syntax
+  (let [network (parse "(network [x out] (-> (+ x 1) out) (list out))")
+        definition (parse "(define pair (network [x same next] (list same next)))")]
+    (is (= :network (ast/type network)))
+    (is (= '[x out] (ast/inputs network)))
+    (is (nil? (ast/output network)))
+    (is (= :def (ast/type definition)))
+    (is (= 'pair (ast/name definition)))
+    (is (= '[x same next] (ast/inputs (ast/body definition)))))
+  (is (thrown? clojure.lang.ExceptionInfo (parse "(network [x] [out] x)"))))
 
-(deftest compile-2-parser-supports-def-and-def-cell
-  (testing "def binds expressions and def-cell lowers free cells and expressions to def"
-    (let [def-ast (parse "(def answer (+ 1 2))")
-          free-def-ast (parse "(def signal)")
-          free-def-cell-ast (parse "(def-cell signal)")
-          def-cells-ast (parse "(def-cells a b)")
-          expr-def-cell-ast (parse "(def-cell inc (cell-expr [x] (+ x 1)))")]
-      (is (= :def (ast/type def-ast)))
-      (is (= 'answer (ast/name def-ast)))
-      (is (= :apply (ast/type (ast/body def-ast))))
-      (is (= :def (ast/type free-def-ast)))
-      (is (= 'signal (ast/name free-def-ast)))
-      (is (nil? (ast/body free-def-ast)))
-      (is (= :def (ast/type free-def-cell-ast)))
-      (is (= 'signal (ast/name free-def-cell-ast)))
-      (is (nil? (ast/body free-def-cell-ast)))
-      (is (= :sequence (ast/type def-cells-ast)))
-      (is (= :def (ast/type expr-def-cell-ast)))
-      (is (= :network (ast/type (ast/body expr-def-cell-ast))))
-      (is (thrown-with-msg? clojure.lang.ExceptionInfo
-                            #"def-cell expression form expects only"
-                            (parse "(def-cell inc [x] (+ x 1))"))))))
+(deftest compile-2-parser-supports-definition-receipts
+  (let [defined (parse "(define answer (+ 1 2))")
+        waiting (parse "(define signal)")
+        literal-nil (parse "(define signal nil)")]
+    (is (= :def (ast/type defined)))
+    (is (= 'answer (ast/name defined)))
+    (is (= :apply (ast/type (ast/body defined))))
+    (is (nil? (ast/body waiting)))
+    (is (= :literal (ast/type (ast/body literal-nil))))
+    (is (nil? (ast/value (ast/body literal-nil)))))
+  (doseq [source ["(def x 1)" "(def-cell x)" "(def-cells x y)"]]
+    (is (thrown? clojure.lang.ExceptionInfo (parse source))))
+  (is (thrown? clojure.lang.ExceptionInfo (parse "(define inc [x] (+ x 1))"))))
 
 (deftest compile-2-parser-has-no-retired-special-forms
   (testing "retired behavior spellings and tombstones are ordinary applications"
@@ -1515,7 +1363,7 @@
           if-ast (parse "(if true 1 2)")
           when-ast (parse "(when ready (<-> 1 out))")
           cond-ast (parse "(cond [false 1 else 2])")
-          constraint-ast (parse "(def-constraint same [a b] (<-> a b))")]
+          constraint-ast (parse "(define same (network [a b] (<-> a b) (list a b)))")]
       (is (= :let (ast/type let-ast)))
       (is (= ['x 'y] (mapv first (ast/bindings let-ast))))
       (is (= :apply (ast/type if-ast)))
@@ -1525,15 +1373,15 @@
       (is (= :apply (ast/type (ast/body when-ast))))
       (is (= :apply (ast/type cond-ast)))
       (is (= 'if (ast/name (ast/operator cond-ast))))
-      (is (= :def-constraint (ast/type constraint-ast)))
+      (is (= :def (ast/type constraint-ast)))
       (is (= 'same (ast/name constraint-ast)))
-      (is (= '[a b] (ast/inputs constraint-ast)))))
+      (is (= '[a b] (ast/inputs (ast/body constraint-ast))))))
   (testing "invalid def-constraint syntax reports parser errors"
     (is (thrown-with-msg? clojure.lang.ExceptionInfo
-                          #"def-constraint name must be a symbol"
-                          (parse "(def-constraint 1 [a] a)")))
+                          #"define expects"
+                          (parse "(define 1 (network [a] a (list a)))")))
     (is (thrown-with-msg? clojure.lang.ExceptionInfo
-                          #"def-constraint inputs must be a vector"
+                          #"was removed"
                           (parse "(def-constraint c a a)")))))
 
 (deftest compile-2-ast-accessors-accept-old-map-asts
@@ -1550,7 +1398,7 @@
 
 (deftest compile-2-network-closure-is-data-only
   (testing "closure declaration emits closure info, not a runtime Closure function"
-    (let [compiled (compile-source "(:: [x] (+ x 1))")
+    (let [compiled (compile-source "(network [x] (+ x 1))")
           callable (strongest (:net compiled) (:cell compiled))
           closure-info (compiler-app/callable-declaration callable)]
       (is (compiler-app/compiler-callable? callable))
@@ -1568,7 +1416,7 @@
 
 (deftest compile-2-implicit-return-closure-rewrites-final-body-form
   (testing "implicit return is ordinary output syntax over only the last body form"
-    (let [compiled (compile-source "(:: [x] (-> 1 x) (+ x 1))")
+    (let [compiled (compile-source "(network [x] (-> 1 x) (+ x 1))")
           callable (strongest (:net compiled) (:cell compiled))
           closure-info (compiler-app/callable-declaration callable)
           [hidden] (obj/slot-value closure-info main/closure-output-slot)
@@ -1592,7 +1440,7 @@
 
 (deftest compile-2-closure-declaration-alone-does-not-evaluate-body
   (testing "declaring a network closure only installs closure data/slot topology"
-    (let [compiled (compile-source "(:: [x] (+ x 1))")
+    (let [compiled (compile-source "(network [x] (+ x 1))")
           result-net (run-compiled compiled)
           callable (strongest result-net (:cell compiled))]
       (is (compiler-app/compiler-callable? callable))
@@ -1602,7 +1450,7 @@
 
 (deftest compile-2-application-installs-application-propagator
   (testing "network closure calls install named flat-GUR application topology"
-    (let [compiled (compile-source "((:: [x] (+ x 1)) 4)")
+    (let [compiled (compile-source "((network [x] (+ x 1)) 4)")
           applications (compiler-app/application-topologies (:net compiled))
           [{:keys [application-id]}] applications
           apply-prop-id (gur/stable-node-id [application-id :apply-prop])
@@ -1615,7 +1463,8 @@
 (deftest compile-2-presence-when-delays-body-topology
   (testing "when compiles the condition immediately and installs body topology only after a usable value"
     (let [expr (ast/sequence*
-                (parse "(def-cells trigger out)")
+                (parse "(define trigger)")
+                (parse "(define out)")
                 (parse "(when trigger (-> 1 out))")
                 (parse "out"))
           compiled (compile-expr expr)
@@ -1639,16 +1488,12 @@
           result-net (run-compiled compiled)]
       (is (= false (strongest result-net (:cell compiled))))))
   (testing "false also propagates through a closure output"
-    (let [compiled (compile-source "(let-cell [out]
-                                      (def-net f [x] [out]
-                                        (-> (<= x 1) out))
-                                      (f 2 out)
-                                      out)")
+    (let [compiled (compile-source "(let-cell [out] (define f (network [x out] (-> (<= x 1) out) (list out))) (f 2 out) out)")
           result-net (run-compiled compiled)]
       (is (= false (strongest result-net (:cell compiled)))))))
 
 (deftest compile-2-def-consumes-let-cell-reservation
-  (let [compiled (compile-source "(let-cell [x] (def x 12) x)")
+  (let [compiled (compile-source "(let-cell [x] (define x 12) x)")
         topology (net/network-dict-entry (:net compiled)
                                          env/lexical-topology-key)
         [frame-id frame] (first (filter (fn [[_ frame]]
@@ -1665,10 +1510,9 @@
 
 (deftest compile-2-named-closures-capture-copied-live-env
   (testing "a named closure's copied env contains its own binding"
-    (let [compiled (compile-source "(def-net self [n] [out]
-                                      (when n (self n out)))")
+    (let [compiled (compile-source "(define self (network [n out] (-> (when n (self n out)) out) (list out)))")
           self-id (compiled-binding-id compiled 'self)
-          callable (strongest (:net compiled) self-id)
+          callable (strongest (run-compiled compiled) self-id)
           closure-env (get callable compiler-app/captured-environment-key)
           binding-ids (get-in (net/network-dict-entry (:net compiled)
                                                       env/lexical-topology-key)
@@ -1678,12 +1522,7 @@
       (is (= self-id
              (env/resolve-binding-id (:net compiled) closure-env 'self)))))
   (testing "same-scope later declarations propagate into the copied env"
-    (let [compiled (compile-source "(let-cell [result]
-                                      (def-net first [x] [out]
-                                        (later x out))
-                                      (def-net later [x] [out]
-                                        (-> (+ x 1) out))
-                                      first)")
+    (let [compiled (compile-source "(let-cell [result] (define first (network [x out] (-> (later x out) out) (list out))) (define later (network [x out] (-> (+ x 1) out) (list out))) first)")
           result-net (run-compiled compiled)
           first-id (compiled-binding-id compiled 'first)
           later-id (compiled-binding-id compiled 'later)
@@ -1694,18 +1533,7 @@
 
 (deftest compile-2-presence-when-supports-direct-recursive-style
   (testing "ordinary self-application inside presence-gated topology can terminate"
-    (let [compiled (compile-source "(let-cell [out]
-                                      (def-net down [n] [out]
-                                        (let-cell [base? recur? a]
-                                          (-> (<= n 1) base?)
-                                          (-> (not base?) recur?)
-                                          (when (switch true base?)
-                                            (-> n out))
-                                          (when (switch true recur?)
-                                            (down (- n 1) a)
-                                            (-> a out))))
-                                      (down 4 out)
-                                      out)")
+    (let [compiled (compile-source "(let-cell [out] (define down (network [n out] (-> (let-cell [base? recur? a] (-> (<= n 1) base?) (-> (not base?) recur?) (when (switch true base?) (-> n out)) (when (switch true recur?) (down (- n 1) a) (-> a out))) out) (list out))) (down 4 out) out)")
           result-net (run-compiled compiled)]
       (is (= 1 (strongest result-net (:cell compiled)))))))
 
@@ -1713,64 +1541,41 @@
   (testing "fib uses only closure self-application plus switch-gated when bodies"
     (doseq [[n expected] [[0 0] [1 1] [5 5]]]
       (let [compiled (compile-source
-                      (format "(let-cell [out]
-                                 (def-net fib [n] [out]
-                                   (let-cell [base? recur? a b]
-                                     (-> (<= n 1) base?)
-                                     (-> (not base?) recur?)
-                                     (when (switch true base?)
-                                       (-> n out))
-                                     (when (switch true recur?)
-                                       (fib (- n 1) a)
-                                       (fib (- n 2) b)
-                                       (-> (+ a b) out))))
-                                 (fib %d out)
-                                 out)"
+                      (format "(let-cell [out] (define fib (network [n out] (-> (let-cell [base? recur? a b] (-> (<= n 1) base?) (-> (not base?) recur?) (when (switch true base?) (-> n out)) (when (switch true recur?) (fib (- n 1) a) (fib (- n 2) b) (-> (+ a b) out))) out) (list out))) (fib %d out) out)"
                               n)
-                      (selected-default-env '<= 'not 'switch '- '+ '->))
+                      (selected-default-env '<= 'not 'switch '- '+ '-> 'list))
             result-net (run-compiled compiled)]
         (is (= expected (strongest result-net (:cell compiled)))
             (str "fib " n))))))
 
 (deftest compile-2-supports-first-slice-network-and-def-net
   (testing "network output cells are explicit application applicants"
-    (let [anonymous (compile-source "(let-cell [out]
-                                       ((network [x] [out] (+ x 1)) 4 out)
-                                       out)")
-          named (compile-source "(let-cell [out]
-                                   (def-net inc [x] [out] (+ x 1))
-                                   (inc 5 out)
-                                   out)")]
+    (let [anonymous (compile-source "(let-cell [out] ((network [x out] (-> (+ x 1) out) (list out)) 4 out) out)")
+          named (compile-source "(let-cell [out] (define inc (network [x out] (-> (+ x 1) out) (list out))) (inc 5 out) out)")]
       (is (= 5 (strongest (run-compiled anonymous) (:cell anonymous))))
       (is (= 6 (strongest (run-compiled named) (:cell named)))))))
 
 (deftest compile-2-supports-def-and-def-cell
   (testing "def creates named cells, def-cell declares free cells, and def-cell names cell-producing expressions"
-    (let [named-value (compile-source "(def answer (+ 1 2))")
+    (let [named-value (compile-source "(define answer (+ 1 2))")
           named-value-net (run-compiled named-value)
           answer-id (compiled-binding-id named-value 'answer)
-          free-def (compile-source "(def signal)")
+          free-def (compile-source "(define signal)")
           signal-id (compiled-binding-id free-def 'signal)
-          free-def-cell (compile-source "(def-cell signal)")
+          free-def-cell (compile-source "(define signal)")
           free-def-cell-id (compiled-binding-id free-def-cell 'signal)
-          free-def-cells (compile-source "(def-cells a b)")
+          free-def-cells (compile-expr (ast/sequence* (parse "(define a)") (parse "(define b)")))
           a-id (compiled-binding-id free-def-cells 'a)
           b-id (compiled-binding-id free-def-cells 'b)
-          expr-cell (compile-source "(let-cell [out]
-                                       (def-cell inc (cell-expr [x] (+ x 1)))
-                                       (<-> (inc 4) out)
-                                       out)")
-          named-cell (compile-source "(let-cell [out]
-                                        (def inc (:: [x] (+ x 1)))
-                                        (<-> (inc 4) out)
-                                        out)")
+          expr-cell (compile-source "(let-cell [out] (define inc (network [x] (+ x 1))) (<-> (inc 4) out) out)")
+          named-cell (compile-source "(let-cell [out] (define inc (network [x] (+ x 1))) (<-> (inc 4) out) out)")
           expr-cell-net (run-compiled expr-cell)
           named-cell-net (run-compiled named-cell)]
-      (is (= (:cell named-value) answer-id))
+      (is (= answer-id (:binding/target (strongest named-value-net (:cell named-value)))))
       (is (= 3 (strongest named-value-net answer-id)))
-      (is (= (:cell free-def) signal-id))
+      (is (= signal-id (:binding/target (strongest (:net free-def) (:cell free-def)))))
       (is (= value/nothing (strongest (:net free-def) signal-id)))
-      (is (= (:cell free-def-cell) free-def-cell-id))
+      (is (= free-def-cell-id (:binding/target (strongest (:net free-def-cell) (:cell free-def-cell)))))
       (is (= value/nothing (strongest (:net free-def-cell) free-def-cell-id)))
       (is (some? a-id))
       (is (some? b-id))
@@ -1806,46 +1611,17 @@
                                             (if c 100 0))))")]
       (is (= 111 (strongest (run-compiled compiled) (:cell compiled))))))
   (testing "def-constraint applications use each applicant as both input and output"
-    (let [forward (compile-source "(let-cell [a b]
-                                    (def-constraint same [x y]
-                                      (<-> x y))
-                                    (same a b)
-                                    (-> 3 a)
-                                    b)")
-          reverse (compile-source "(let-cell [a b]
-                                    (def-constraint same [x y]
-                                      (<-> x y))
-                                    (same a b)
-                                    (-> 4 b)
-                                    a)")
-          reused (compile-source "(let-cell [a b c d]
-                                   (def-constraint same [x y]
-                                     (<-> x y))
-                                   (same a b)
-                                   (same c d)
-                                   (-> 3 a)
-                                   (-> 8 c)
-                                   (+ b d))")
-          lexical (compile-source "(let-cell [x y]
-                                    (def bias 2)
-                                    (def-constraint add-bias [a out]
-                                      (<-> (+ a bias) out))
-                                    (add-bias x y)
-                                    (-> 5 x)
-                                    y)")
-          returned (compile-source "(let-cell [a b]
-                                     (def-constraint same [x y]
-                                       (<-> x y))
-                                     (-> 9 a)
-                                     (same a b))")
-          empty (compile-source "(let-cell []
-                                  (def-constraint constant [] 12)
-                                  (constant))")]
+    (let [forward (compile-source "(let-cell [a b] (define same (network [x y] (<-> x y) (list x y))) (same a b) (-> 3 a) b)")
+          reverse (compile-source "(let-cell [a b] (define same (network [x y] (<-> x y) (list x y))) (same a b) (-> 4 b) a)")
+          reused (compile-source "(let-cell [a b c d] (define same (network [x y] (<-> x y) (list x y))) (same a b) (same c d) (-> 3 a) (-> 8 c) (+ b d))")
+          lexical (compile-source "(let-cell [x y] (define bias 2) (define add-bias (network [a out] (<-> (+ a bias) out) (list a out))) (add-bias x y) (-> 5 x) y)")
+          returned (compile-source "(let-cell [a b] (define same (network [x y] (<-> x y) (list x y))) (-> 9 a) (same a b))")
+          empty (compile-source "(let-cell [] (define constant (network [] 12)) (constant))")]
       (is (= 3 (strongest (run-compiled forward) (:cell forward))))
       (is (= 4 (strongest (run-compiled reverse) (:cell reverse))))
       (is (= 11 (strongest (run-compiled reused) (:cell reused))))
       (is (= 7 (strongest (run-compiled lexical) (:cell lexical))))
-      (is (= 9 (strongest (run-compiled returned) (:cell returned))))
+      (is (net/network? (strongest (run-compiled returned) (:cell returned))))
       (is (= 12 (strongest (run-compiled empty) (:cell empty)))))))
 
 (deftest compile-2-network-requires-explicit-output-applicant
@@ -1854,30 +1630,20 @@
          clojure.lang.ExceptionInfo
          #"Closure application has invalid arity"
          (run-compiled
-          (compile-source "((network [x] [out] (+ x 1)) 4)"))))))
+          (compile-source "((network [x out] (-> (+ x 1) out) (list out)) 4)"))))))
 
 (deftest compile-2-cell-expression-returns-body-result
   (testing "cell-expr is the zero-output closure form for expression results"
-    (let [compiled (compile-source "((cell-expr [x] (+ x 1)) 4)")
+    (let [compiled (compile-source "((network [x] (+ x 1)) 4)")
           result-net (run-compiled compiled)]
       (is (= 5 (strongest result-net (:cell compiled)))))))
 
 (deftest compile-2-network-and-def-net-support-multiple-explicit-outputs
   (testing "multi-output applications write to explicit output cells"
     (let [anonymous (compile-source
-                     "(let-cell [same next]
-                        ((network [x] [same next]
-                           (<-> x same)
-                           (<-> (+ x 1) next))
-                         4 same next)
-                        next)")
+                     "(let-cell [same next] ((network [x same next] (<-> x same) (<-> (+ x 1) next) (list same next)) 4 same next) next)")
           named (compile-source
-                 "(let-cell [same next]
-                    (def-net pair [x] [same next]
-                      (<-> x same)
-                      (<-> (+ x 1) next))
-                    (pair 5 same next)
-                    next)")
+                 "(let-cell [same next] (define pair (network [x same next] (<-> x same) (<-> (+ x 1) next) (list same next))) (pair 5 same next) next)")
           anonymous-net (run-compiled anonymous)
           named-net (run-compiled named)]
       (is (= 5 (strongest anonymous-net (:cell anonymous))))
@@ -1886,14 +1652,7 @@
 (deftest compile-2-multi-output-survives-nested-closure-application
   (testing "an outer closure can route explicit output cells through an inner network"
     (let [compiled (compile-source
-                    "(let-cell [same next]
-                       (def-net pair [x] [same next]
-                         (<-> x same)
-                         (<-> (+ x 1) next))
-                       (def-net outer [x] [same next]
-                         (pair x same next))
-                       (outer 8 same next)
-                       next)")
+                    "(let-cell [same next] (define pair (network [x same next] (<-> x same) (<-> (+ x 1) next) (list same next))) (define outer (network [x same next] (pair x same next) (list same next))) (outer 8 same next) next)")
           result-net (run-compiled compiled)]
       (is (= 9 (strongest result-net (:cell compiled)))))))
 
@@ -1907,9 +1666,7 @@
           next-id (compiled-binding-id compiled 'next)
           n0 (run-compiled compiled)
           closure-compiled (compile-source
-                            "(network [x] [same next]
-                               (<-> x same)
-                               (<-> (+ x 1) next))"
+                            "(network [x same next] (<-> x same) (<-> (+ x 1) next) (list same next))"
                             (:env compiled)
                             {:net n0 :seed [:late-multi-output]})
           closure-value (strongest (:net closure-compiled)
@@ -1928,15 +1685,14 @@
 (deftest compile-2-application-output-adapter-is-not-materializing
   (testing "closure application projects result cells without a materialization helper"
     (let [source (slurp (io/resource "propagators/compiler/lowering/application.clj"))
-          direct (compile-source "((:: [x] (+ x 1)) 4)")
+          direct (compile-source "((network [x] (+ x 1)) 4)")
           late (compile-source "(let-cell [some-net out]
                                  (some-net 4 out)
                                  out)")
           some-net-id (compiled-binding-id late 'some-net)
           out-id (compiled-binding-id late 'out)
           n0 (run-compiled late)
-          closure-compiled (compile-source "(network [x] [out]
-                                             (<-> x out))"
+          closure-compiled (compile-source "(network [x out] (<-> x out) (list out))"
                                            (:env late)
                                            {:net n0
                                             :seed [:late-output-adapter]})
@@ -1968,11 +1724,7 @@
     (let [[bias-id base-net] (seeded-cell net/empty-net 10)
           env (with-binding (h/default-bindings) 'bias (env/cell-binding bias-id) 0)
           compiled (compile-source
-                    "(let-cell [add-bias]
-                       (<-> add-bias
-                            (:: [x]
-                              (+ x bias)))
-                       (add-bias 5))"
+                    "(let-cell [add-bias] (<-> add-bias (network [x] (+ x bias))) (add-bias 5))"
                     env
                     {:net base-net})
           apply-inputs (propagator-inputs-writing-to (:net compiled)
@@ -1989,11 +1741,7 @@
     (let [[outer-x-id base-net] (seeded-cell net/empty-net 100)
           env (with-binding (h/default-bindings) 'x (env/cell-binding outer-x-id) 0)
           compiled (compile-source
-                    "(let-cell [inc-local]
-                       (<-> inc-local
-                            (:: [x]
-                              (+ x 1)))
-                       (inc-local 5))"
+                    "(let-cell [inc-local] (<-> inc-local (network [x] (+ x 1))) (inc-local 5))"
                     env
                     {:net base-net})
           result-net (run-compiled compiled)]
@@ -2004,13 +1752,7 @@
     (let [[outer-x-id base-net] (seeded-cell net/empty-net 100)
           env (with-binding (h/default-bindings) 'x (env/cell-binding outer-x-id) 0)
           compiled (compile-source
-                    "(let-cell [use-local-x]
-                       (<-> use-local-x
-                            (:: []
-                              (let-cell [x]
-                                (<-> 7 x)
-                                x)))
-                       (use-local-x))"
+                    "(let-cell [use-local-x] (<-> use-local-x (network [] (let-cell [x] (<-> 7 x) x))) (use-local-x))"
                     env
                     {:net base-net})
           result-net (run-compiled compiled)]
@@ -2020,24 +1762,14 @@
 (deftest compile-2-escaped-closure-preserves-lexical-env-through-output
   (testing "a returned closure carries its lexical environment through the declared output"
     (let [compiled (compile-source
-                    "(let-cell [make-adder]
-                       (<-> make-adder
-                            (:: [bias]
-                              (:: [x]
-                                (+ x bias))))
-                       ((make-adder 10) 5))")
+                    "(let-cell [make-adder] (<-> make-adder (network [bias] (network [x] (+ x bias)))) ((make-adder 10) 5))")
           result-net (run-compiled compiled)]
       (is (= 15 (strongest result-net (:cell compiled)))))))
 
 (deftest compile-2-dependency-env-uses-active-closure-application-context
   (testing "nested closure arithmetic records the later inner application context"
     (let [compiled (compile-source
-                    "(let-cell [make-adder]
-                       (<-> make-adder
-                            (:: [bias]
-                              (:: [x]
-                                (+ x bias))))
-                       ((make-adder 10) 5))"
+                    "(let-cell [make-adder] (<-> make-adder (network [bias] (network [x] (+ x bias)))) ((make-adder 10) 5))"
                     (h/dependency-bindings)
                     {})
           result-net (run-compiled compiled)
@@ -2059,11 +1791,7 @@
                                         #{:outer-source}))
           env (with-binding (h/dependency-bindings) 'a (env/cell-binding a-id) 0)
           compiled (compile-source
-                    "(let-cell [add-a]
-                       (<-> add-a
-                            (:: [x]
-                              (+ a x)))
-                       (add-a 5))"
+                    "(let-cell [add-a] (<-> add-a (network [x] (+ a x))) (add-a 5))"
                     env
                     {:net base-net})
           result-net (run-compiled compiled)
@@ -2083,44 +1811,14 @@
 (deftest compile-2-supports-multiple-nested-compounds-in-one-compound
   (testing "an outer compound can define and apply nested compound propagators.infra"
     (let [compiled (compile-source
-                    "(let-cell [outer]
-                       (<-> outer
-                            (:: [x]
-                              (let-cell [inc scale-after-inc]
-                                (<-> inc
-                                     (:: [y]
-                                       (+ y 1)))
-                                (<-> scale-after-inc
-                                     (:: [y]
-                                       (let-cell [double]
-                                         (<-> double
-                                              (:: [v]
-                                                (* v 2)))
-                                         (double (inc y)))))
-                                (+ (inc x) (scale-after-inc x)))))
-                       (outer 4))")
+                    "(let-cell [outer] (<-> outer (network [x] (let-cell [inc scale-after-inc] (<-> inc (network [y] (+ y 1))) (<-> scale-after-inc (network [y] (let-cell [double] (<-> double (network [v] (* v 2))) (double (inc y))))) (+ (inc x) (scale-after-inc x))))) (outer 4))")
           result-net (run-compiled compiled)]
       (is (= 15 (strongest result-net (:cell compiled)))))))
 
 (deftest compile-2-supports-multiple-compound-declarations-inside-one-compound
   (testing "one compound can declare several local compound propagators.infra and apply them over its arguments"
     (let [compiled (compile-source
-                    "(let-cell [pipeline]
-                       (<-> pipeline
-                            (:: [a b]
-                              (let-cell [add2 mul2 inc]
-                                (<-> add2
-                                     (:: [x y]
-                                       (+ x y)))
-                                (<-> mul2
-                                     (:: [x y]
-                                       (* x y)))
-                                (<-> inc
-                                     (:: [x]
-                                       (+ x 1)))
-                                (+ (add2 a b)
-                                   (mul2 (inc a) b)))))
-                       (pipeline 3 4))")
+                    "(let-cell [pipeline] (<-> pipeline (network [a b] (let-cell [add2 mul2 inc] (<-> add2 (network [x y] (+ x y))) (<-> mul2 (network [x y] (* x y))) (<-> inc (network [x] (+ x 1))) (+ (add2 a b) (mul2 (inc a) b))))) (pipeline 3 4))")
           result-net (run-compiled compiled)]
       (is (= 23 (strongest result-net (:cell compiled)))))))
 
@@ -2177,14 +1875,7 @@
       (is (= 9 (strongest result-net (:cell compiled)))))))
 
 (deftest compile-2-switch-preserves-distributed-tms-through-forward-sync
-  (let [compiled (compile-source "(let-cell [a gated out]
-                                    (def value 2)
-                                    (def premise :switch/source)
-                                    (def epoch 0)
-                                    (premise-input value premise epoch a)
-                                    (switch a true gated)
-                                    (-> gated out)
-                                    out)"
+  (let [compiled (compile-source "(let-cell [a gated out] (define value 2) (define premise :switch/source) (define epoch 0) (premise-input value premise epoch a) (switch a true gated) (-> gated out) out)"
                                  (selected-default-env
                                   'premise-input
                                   'switch
@@ -2198,31 +1889,13 @@
 #_(deftest compiler-2-behavior-tms-env-supports-switch-and-forward-sync
   (testing "explicit-output switch gates behavior content"
     (let [compiled (main/compile-source-with-behavior-tms
-                    "(let-cell [events retained gated out]
-                       (def-net retain-latest [acc next] [out]
-                         (let-cell [full]
-                           (behavior-add-event acc next full)
-                           (behavior-retain-last full 1 out)))
-                       (behavior-event 6 2 events)
-                       (behavior-cell events (behavior-empty-state) retain-latest retained)
-                       (switch retained true gated)
-                       (-> (be:+ gated gated) out)
-                       out)"
+                    "(let-cell [events retained gated out] (define retain-latest (network [acc next out] (-> (let-cell [full] (behavior-add-event acc next full) (behavior-retain-last full 1 out)) out) (list out))) (behavior-event 6 2 events) (behavior-cell events (behavior-empty-state) retain-latest retained) (switch retained true gated) (-> (be:+ gated gated) out) out)"
                     {:net (behavior-tms-protocol-net)})
           result-net (run-compiled compiled)]
       (is (= 4 (behavior-current-value result-net (:cell compiled))))))
   (testing "expression-style switch gates behavior content"
     (let [compiled (main/compile-source-with-behavior-tms
-                    "(let-cell [events retained out]
-                       (def-net retain-latest [acc next] [out]
-                         (let-cell [full]
-                           (behavior-add-event acc next full)
-                           (behavior-retain-last full 1 out)))
-                       (behavior-event 6 2 events)
-                       (behavior-cell events (behavior-empty-state) retain-latest retained)
-                       (def gated (switch retained true))
-                       (-> (be:+ gated gated) out)
-                       out)"
+                    "(let-cell [events retained out] (define retain-latest (network [acc next out] (-> (let-cell [full] (behavior-add-event acc next full) (behavior-retain-last full 1 out)) out) (list out))) (behavior-event 6 2 events) (behavior-cell events (behavior-empty-state) retain-latest retained) (define gated (switch retained true)) (-> (be:+ gated gated) out) out)"
                     {:net (behavior-tms-protocol-net)})
           result-net (run-compiled compiled)]
       (is (= 4 (behavior-current-value result-net (:cell compiled)))))))
@@ -2283,8 +1956,7 @@
           n0 (run-compiled compiled)
           closure-compiled
           (compile-source
-           "(network [x] [out]
-              (<-> (+ x 1) out))"
+           "(network [x out] (<-> (+ x 1) out) (list out))"
            (h/default-bindings)
            {:net n0})
           closure-value (strongest (:net closure-compiled)
@@ -2297,23 +1969,22 @@
       (is (= value/nothing (strongest n0 out-id)))
       (is (= 3 (strongest n2 out-id))))))
 
-(deftest compile-2-def-net-shadows-unresolved-operator-cell
-  (testing "a later def-net gets a fresh binding and does not mutate an earlier unresolved application"
-    (let [a-def (compile-source "(def a)")
+(deftest compile-2-definition-refines-unresolved-operator-cell
+  (testing "a later definition refines the waiting operator and activates the retained application"
+    (let [a-def (compile-source "(define a)")
           early (compile-source "(inc 1 a)"
                                 (:env a-def)
                                 {:net (:net a-def)})
           inc-id (compiled-binding-id early 'inc)
           a-id (compiled-binding-id early 'a)
           n0 (nb/run-propagators (:net early) (:props early))
-          late (compile-source "(def-net inc [x] [out]
-                                  (<-> (+ x 1) out))"
+          late (compile-source "(define inc (network [x out] (<-> (+ x 1) out) (list out)))"
                                (:env early)
                                {:net n0})
           n1 (nb/run-propagators (:net late) (:props late))]
-      (is (not= inc-id (compiled-binding-id late 'inc)))
+      (is (= inc-id (compiled-binding-id late 'inc)))
       (is (= value/nothing (strongest n0 a-id)))
-      (is (= value/nothing (strongest n1 a-id))))))
+      (is (= 2 (strongest n1 a-id))))))
 
 (deftest compile-2-application-before-closure-waits-for-later-input-fire
   (testing "an application can exist before the operator closure and evaluate on a later input update"
@@ -2324,8 +1995,7 @@
           a-id (compiled-binding-id compiled 'a)
           out-id (compiled-binding-id compiled 'out)
           n0 (run-compiled compiled)
-          closure-compiled (compile-source "(network [x] [out]
-                                             (<-> (+ x 1) out))"
+          closure-compiled (compile-source "(network [x out] (<-> (+ x 1) out) (list out))"
                                            (:env compiled)
                                            {:net n0
                                             :seed [:late-input-fire]})
@@ -2384,19 +2054,7 @@
 #_(deftest execute-sub-env-behavior-tms-env-supports-switch-and-forward-sync
   (let [parent-env (h/behavior-tms-bindings)
         expr (execute-sub-env-ast
-              (parse "(let-cell [events retained gated out]
-                        (def-net retain-latest [acc next] [out]
-                          (let-cell [full]
-                            (behavior-add-event acc next full)
-                            (behavior-retain-last full 1 out)))
-                        (behavior-event 6 2 events)
-                        (behavior-cell events
-                                       (behavior-empty-state)
-                                       retain-latest
-                                       retained)
-                        (switch retained true gated)
-                        (-> (be:+ gated gated) out)
-                        out)")
+              (parse "(let-cell [events retained gated out] (define retain-latest (network [acc next out] (-> (let-cell [full] (behavior-add-event acc next full) (behavior-retain-last full 1 out)) out) (list out))) (behavior-event 6 2 events) (behavior-cell events (behavior-empty-state) retain-latest retained) (switch retained true gated) (-> (be:+ gated gated) out) out)")
               parent-env)
         compiled (main/compile-expr-with-behavior-tms
                   expr
@@ -2597,13 +2255,7 @@
                       'tms-insert
                       (tms-insert-fact-operator)
                       0)
-        compiled (compile-source "(let-cell []
-                                    (def value :yes)
-                                    (def premise :from-pair)
-                                    (def tms)
-                                    (def pair (cons value premise))
-                                    (tms-insert tms (car pair) (cdr pair))
-                                    tms)"
+        compiled (compile-source "(let-cell [] (define value :yes) (define premise :from-pair) (define tms) (define pair (cons value premise)) (tms-insert tms (car pair) (cdr pair)) tms)"
                                  env)
         n0 (run-compiled compiled)
         result-id (addressed-cell-id n0 (:cell compiled))
@@ -2628,17 +2280,7 @@
                                (tms-premise-epoch-operator false)
                                0))
         setup (compile-source
-                    "(let-cell []
-                       (def p-one :definition/plus-one)
-                       (def p-ten :definition/plus-ten)
-                       (def one-believe 0)
-                       (def ten-believe 0)
-                       (def tms)
-                       (premise-out tms 6 p-one)
-                       (premise-out tms 15 p-ten)
-                       (believe-premise p-one one-believe tms)
-                       (believe-premise p-ten ten-believe tms)
-                       tms)"
+                    "(let-cell [] (define p-one :definition/plus-one) (define p-ten :definition/plus-ten) (define one-believe 0) (define ten-believe 0) (define tms) (premise-out tms 6 p-one) (premise-out tms 15 p-ten) (believe-premise p-one one-believe tms) (believe-premise p-ten ten-believe tms) tms)"
                     base-env
                     {:net net/empty-net})
         n0 (run-compiled setup)
@@ -2885,15 +2527,7 @@
                        (let [compiled (compile-source source env {:net network})]
                          [compiled (run-compiled compiled)]))
         [setup n0] (compile-step
-                    "(let-cell []
-                       (def p-left :premise/left)
-                       (def p-right :premise/right)
-                       (def tms)
-                       (believe-premise p-left 0 tms)
-                       (believe-premise p-right 0 tms)
-                       (claim-left 28 tms)
-                       (claim-right 36 tms)
-                       tms)"
+                    "(let-cell [] (define p-left :premise/left) (define p-right :premise/right) (define tms) (believe-premise p-left 0 tms) (believe-premise p-right 0 tms) (claim-left 28 tms) (claim-right 36 tms) tms)"
                     base-env
                     net/empty-net)
         env0 (compiled-result-env setup)
@@ -2917,12 +2551,7 @@
                        (let [compiled (compile-source source env {:net network})]
                          [compiled (run-compiled compiled)]))
         [setup n0] (compile-step
-                    "(let-cell [a f]
-                       (def pa :premise/a)
-                       (def pa0 0)
-                       (premise-input 8 pa pa0 a)
-                       (-> a f)
-                       f)"
+                    "(let-cell [a f] (define pa :premise/a) (define pa0 0) (premise-input 8 pa pa0 a) (-> a f) f)"
                     (selected-default-env
                      'premise-input 'premise-retract '->)
                     (tms-distributed-protocol-net))
@@ -2947,16 +2576,7 @@
 (deftest compiler-2-distributed-tms-wraps-network-declaration-closure
   (let [setup
         (compile-source
-         "(let-cell [a out]
-            (def value 8)
-            (def premise :premise/a)
-            (def epoch 0)
-            (premise-input value premise epoch a)
-            (def-net identity [a] [out]
-              (<-> a out))
-            (def tms-identity (tms-closure identity))
-            (tms-identity a out)
-            out)"
+         "(let-cell [a out] (define value 8) (define premise :premise/a) (define epoch 0) (premise-input value premise epoch a) (define identity (network [a] a)) (define tms-identity (tms-closure identity)) (-> (tms-identity a) out) out)"
          (h/default-bindings)
          (tms-distributed-protocol-net))
         n0 (run-compiled setup)
@@ -2966,74 +2586,32 @@
     (is (contains? (distributed-slot-keys n0 out-id)
                    (tms/premise-slot-key :premise/a 0)))))
 
-(deftest compiler-2-redefined-premise-closure-adds-fresh-application-topology
-  (let [setup
-        (compile-source
-         "(let-cell [out]
-            (def-net identity [x] [out]
-              (<-> x out))
-            (def six 6)
-            (def fifteen 15)
-            (def p-one :definition/plus-one)
-            (def p-ten :definition/plus-ten)
-            (def e0 0)
-            (def op
-              (premise-closure
-                (network [f x] [out]
-                  (f x out))
-                p-one
-                e0))
-            (op identity six out)
-            (def op
-              (premise-closure
-                (network [f x] [out]
-                  (f x out))
-                p-ten
-                e0))
-            (op identity fifteen out)
-            out)"
-         (h/default-bindings)
-         (tms-distributed-protocol-net))
-        n0 (run-compiled setup)
-        env0 (compiled-result-env setup)
-        out-id (env/resolve-binding-id n0 env0 'out)]
-    ;; The earlier application remains wired to plus-one. The later definition
-    ;; gets a fresh current address, so the application declared after it adds
-    ;; the plus-ten claim without rebuilding the first topology.
-    (is (value/contradiction? (distributed-current-value n0 out-id)))
-    (is (contains? (distributed-slot-keys n0 out-id)
-                   (tms/premise-slot-key :definition/plus-one 0)))
-    (is (contains? (distributed-slot-keys n0 out-id)
-                   (tms/premise-slot-key :definition/plus-ten 0)))))
+(deftest compiler-2-shadowed-premise-closures-preserve-both-claims
+  (let [compiled (compile-source
+                  "(let-cell [out] (define identity (network (x) x))
+                     (define op (premise-closure (network (f x) (f x)) :definition/plus-one 0))
+                     (-> (op identity 6) out)
+                     (let [op (premise-closure (network (f x) (f x)) :definition/plus-ten 0)]
+                       (-> (op identity 15) out)) out)"
+                  (h/default-bindings) (tms-distributed-protocol-net))
+        network (run-compiled compiled)
+        out-id (:cell compiled)]
+    (is (value/contradiction? (distributed-current-value network out-id)))
+    (is (contains? (distributed-slot-keys network out-id) (tms/premise-slot-key :definition/plus-one 0)))
+    (is (contains? (distributed-slot-keys network out-id) (tms/premise-slot-key :definition/plus-ten 0)))))
 
 (deftest compiler-2-distributed-premise-closure-marks-network-output
-  (let [setup (compile-source
-                    "(let-cell [x out]
-                       (def vx 5)
-                       (def px :premise/input)
-                       (def pd :premise/definition)
-                       (def e0 0)
-                       (premise-input vx px e0 x)
-                       (def-net inc [x] [out]
-                         (<-> (+ x 1) out))
-                       (def apply-inc
-                         (premise-closure
-                           (network [f x] [out]
-                             (f x out))
-                           pd
-                           e0))
-                       (apply-inc inc x out)
-                       out)"
-                    (h/default-bindings)
-                    (tms-distributed-protocol-net))
-        n0 (run-compiled setup)
-        env0 (compiled-result-env setup)
-        out-id (env/resolve-binding-id n0 env0 'out)]
-    (is (= 6 (distributed-current-value n0 out-id)))
-    (is (contains? (distributed-slot-keys n0 out-id)
-                   (tms/premise-slot-key :premise/input 0)))
-    (is (contains? (distributed-slot-keys n0 out-id)
-                   (tms/premise-slot-key :premise/definition 0)))))
+  (let [compiled (compile-source
+                  "(let-cell [x out] (premise-input 5 :premise/input 0 x)
+                     (define inc (network (x) (+ x 1)))
+                     (define apply-inc (premise-closure (network (f x) (f x)) :premise/definition 0))
+                     (-> (apply-inc inc x) out) out)"
+                  (h/default-bindings) (tms-distributed-protocol-net))
+        network (run-compiled compiled)
+        out-id (:cell compiled)]
+    (is (= 6 (distributed-current-value network out-id)))
+    (is (contains? (distributed-slot-keys network out-id) (tms/premise-slot-key :premise/input 0)))
+    (is (contains? (distributed-slot-keys network out-id) (tms/premise-slot-key :premise/definition 0)))))
 
 #_(deftest compiler-2-distributed-tms-composes-with-behavior-arithmetic
   (let [left (behavior-view [(hist/point-record 6 2)] #{[:left 6]})
@@ -3047,31 +2625,17 @@
                        (let [compiled (compile-source source env {:net network})]
                          [compiled (run-compiled compiled)]))
         [setup n0] (compile-step
-                    "(let-cell [a b out]
-                       (def p-left :premise/left)
-                       (def p-right :premise/right)
-                       (def p-left0 0)
-                       (def p-right0 0)
-                       (premise-content-input left-source p-left p-left0 a)
-                       (premise-content-input right-source p-right p-right0 b)
-                       (<-> (be:+ a b) out)
-                       out)"
+                    "(let-cell [a b out] (define p-left :premise/left) (define p-right :premise/right) (define p-left0 0) (define p-right0 0) (premise-content-input left-source p-left p-left0 a) (premise-content-input right-source p-right p-right0 b) (<-> (be:+ a b) out) out)"
                     env
                     n2)
         env0 (compiled-result-env setup)
         out-id (env/binding-id (binding-value env0 'out))
         [left-retracted n3] (compile-step
-                             "(let-cell []
-                                (def p-left1 1)
-                                (premise-retract p-left p-left1 a)
-                                out)"
+                             "(let-cell [] (define p-left1 1) (premise-retract p-left p-left1 a) out)"
                              env0
                              n0)
         [left-brought n4] (compile-step
-                           "(let-cell []
-                              (def p-left2 2)
-                              (premise-believe p-left p-left2 a)
-                              out)"
+                           "(let-cell [] (define p-left2 2) (premise-believe p-left p-left2 a) out)"
                            (:env left-retracted)
                            n3)]
     (is (= 9 (distributed-behavior-current-value n0 out-id)))

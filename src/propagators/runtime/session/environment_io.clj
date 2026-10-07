@@ -362,12 +362,12 @@
                  (fn [record]
                    (map-indexed
                     (fn [position form]
-                      (list 'def
+                      (list 'define
                             (symbol (str "block__lain_"
                                          (:index block) "_v"
                                          (:version record) "_archived_"
                                          position))
-                            (list 'cell-expr [] form)))
+                            (list 'network [] form)))
                     (remove export/definition-form?
                             (source/read-source-forms (:source record)))))
                  (butlast records))]

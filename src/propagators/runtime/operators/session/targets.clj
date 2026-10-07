@@ -50,6 +50,8 @@
   [outbox-id instance-id]
   (operator-value/operator-closure
    {:name 'block
+    :input-selector (fn [arg-ids result-id _context-id]
+                      (vec (distinct (into [instance-id result-id] arg-ids))))
     :output-selector (fn [arg-ids fallback-id]
                        (or (nth (vec arg-ids) 1 nil) fallback-id))
     :activate (fn [network _context-id arg-ids out-id]

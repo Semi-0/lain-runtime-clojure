@@ -217,3 +217,40 @@
       (is (ids/node-id? closure-id))
       (is (gur/recursive-closure?
            (net/network-cell-strongest program-net closure-id))))))
+
+(deftest lain-tracer-executes-in-a-disposed-flat-network
+  (let [module (.getCanonicalPath
+                (io/file (io/resource "propagators/compiler/lowering/one_time_network.clj")))
+        source (.getCanonicalPath
+                (io/file (io/resource "propagators/runtime/lain/network_trace.lain")))
+        imported (environment-io/install-primitive-environment
+                  (runtime-state/empty-state)
+                  {:file module
+                   :entry :propagators.compiler.lowering.one-time-network/trace-environment
+                   :revision 0})
+        loaded (environment-io/load-lain
+                {:drain-environment-effects effects/drain-environment-effects}
+                (:state imported)
+                {:boundary/kind :environment/load-lain
+                 :boundary/payload {:file source :revision 0}})
+        state (:state loaded)
+        closure-id (compiler-env/resolve-binding-id (:program/net state)
+                                                    (:program/env state) 'trace-breadth-first)
+        root (ids/new-node-id)
+        context-id (ids/new-node-id)
+        root-argument (ids/new-node-id)
+        direction (ids/new-node-id)
+        result-id (ids/new-node-id)
+        active (-> (:program/net state)
+                   (nb/install-cell root 42 42)
+                   (nb/install-cell context-id :context :context)
+                   (nb/install-cell root-argument root root)
+                   (nb/install-cell direction :both :both))
+        result (one-time/run-flat-gur-once active context-id closure-id
+                                          [root-argument direction]
+                                          (one-time/compound-projection) result-id)]
+    (is (= root (get-in result [:value :trace/root])))
+    (is (= [root] (get-in result [:value :trace/nodes])))
+    (is (= [] (get-in result [:value :trace/edges])))
+    (is (:temporary-net-disposed? result))
+    (is (not (contains? (net/net-env active) result-id)))))

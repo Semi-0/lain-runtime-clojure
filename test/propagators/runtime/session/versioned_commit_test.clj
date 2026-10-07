@@ -154,7 +154,7 @@
 
 (deftest explicit-trace-refreshes-deferred-versioned-semantic-graph
   (let [session (runtime/new-session)
-        sources ["(def-cells a g)"
+        sources ["(define a) (define g)"
                  "(<-> (- 3 1) a)"
                  "(trace a :upstream g)"]]
     (runtime/register-tui! session {:client-id "A" :mode :versioned-premise})
@@ -187,7 +187,7 @@
   (let [session (runtime/new-session)]
     (runtime/register-tui! session {:client-id "A" :mode :versioned-premise})
     (runtime/commit-version! session
-                             (block-request c0 0 nil "(def x 4)"))
+                             (block-request c0 0 nil "(define x 4)"))
     (runtime/commit-version! session
                              (block-request c1 1 nil "(+ x 1)"))
     (is (= 5 (semantic-result @session "A" 1)))
@@ -210,7 +210,7 @@
     (runtime/commit-version!
      session
      (block-request "00000000-0000-0000-0000-000000000004"
-                    0 0 "(def x 6)"))
+                    0 0 "(define x 6)"))
     (is (= 7 (semantic-result @session "A" 1))
         "a stable scalar binding reactivates the retained caller")
     (runtime/commit-version!
@@ -225,9 +225,10 @@
     (runtime/commit-version!
      session
      (block-request c0 0 nil
-                    "(def inc (network [a] [b] (-> (+ a 1) b)))"))
-    (let [closure-cell (get-in @session
-                               [:program/results ["A" 0] :compiled :cell])]
+                    "(define inc (network [a b] (-> (+ a 1) b) (list b)))"))
+    (let [closure-cell (-> (vals (net/network-dict-entry
+                                  (:program/net @session) definition/candidates-key))
+                          first :candidate/callable-cell)]
       (is (not (tms/distributed-value?
                 (net/network-cell-content (:program/net @session)
                                           closure-cell)))))
@@ -254,7 +255,7 @@
     (runtime/commit-version!
      session
      (block-request c0 0 nil
-                    "(def-net inc [a] [b] (-> (+ a 1) b))"))
+                    "(define inc (network [a b] (-> (+ a 1) b) (list b)))"))
     (runtime/commit-version!
      session
      (block-request c1 1 nil "(let-cell [out] (inc 4 out) out)"))
@@ -263,7 +264,7 @@
       (runtime/commit-version!
        session
        (block-request "00000000-0000-0000-0000-000000000004"
-                      0 0 "(def-net inc [a] [b] (-> (+ a 2) b))"))
+                      0 0 "(define inc (network [a b] (-> (+ a 2) b) (list b)))"))
       (is (= 6 (semantic-result @session "A" 1)))
       (is (every? #(contains? (net/net-env (:program/net @session)) %)
                   ids-before)))))
@@ -274,7 +275,7 @@
     (runtime/commit-version!
      session
      (block-request c0 0 nil
-                    "(def-net add-17 [x] [out] (+ x 17))"))
+                    "(define add-17 (network [x out] (-> (+ x 17) out) (list out)))"))
     (runtime/commit-version!
      session
      (block-request c1 1 nil
@@ -337,15 +338,15 @@
     (runtime/commit-version!
      session
      (block-request c0 0 nil
-                    "(def-net add-17 [x] [out] (+ x 17))"))
+                    "(define add-17 (network [x out] (-> (+ x 17) out) (list out)))"))
     (runtime/commit-version!
      session
-     (block-request c1 1 nil "(add-17 20 (block 2))"))
+     (block-request c1 1 nil "(-> (car (add-17 20 (block 2))) (block 2))"))
     (is (= 37 (get-in (runtime/read-tui-view @session {:client-id "A"})
                       [:blocks 2 :value])))
     (runtime/commit-version!
      session
-     (block-request c2 1 0 "(add-17 60 (block 2))"))
+     (block-request c2 1 0 "(-> (car (add-17 60 (block 2))) (block 2))"))
     (let [state @session
           caller-block (block-model/block-by-index state "A" 1)
           display-block (block-model/block-by-index state "A" 2)
@@ -368,15 +369,14 @@
     (runtime/register-tui! session {:client-id "A" :mode :versioned-premise})
     (runtime/commit-version!
      session
-     (block-request c0 0 nil "(def-net f [a] [b] (-> (+ a 1) b))"))
+     (block-request c0 0 nil "(define f (network [a b] (-> (+ a 1) b) (list b)))"))
     (runtime/commit-version!
      session
      (block-request c1 1 nil "(let-cell [out] (f 4 out) out)"))
     (runtime/commit-version!
      session
      (block-request "00000000-0000-0000-0000-000000000004" 0 0
-                    (str "(def-net f [a missing] [b extra] "
-                         "(-> (+ a 2) b) (-> (+ a 3) extra))")))
+                    "(define f (network [a b missing extra] (-> (+ a 2) b) (-> (+ a 3) extra) (list b extra)))"))
     (let [network (:program/net @session)
           metadata (get (net/network-dict-entry network fvm/name-bindings-key)
                         definition/call-metadata-scope)
@@ -387,14 +387,14 @@
                             (mapcat :placeholder-ids)
                             set)]
       (is (= 6 (semantic-result @session "A" 1)))
-      (is (= #{:missing-inputs :missing-outputs}
+      (is (= #{:missing-inputs}
              (set (map :warning warnings))))
       (is (= 2 (count placeholders)))
       (is (every? #(contains? (net/net-env network) %) placeholders))
       (runtime/commit-version!
        session
        (block-request "00000000-0000-0000-0000-000000000005" 1 0
-                      "(let-cell [out extra] (f 4 0 out extra) out)"))
+                      "(let-cell [out extra] (f 4 out 0 extra) out)"))
       (is (empty? (mapcat :warnings
                           (:blocks (runtime/read-tui-view
                                     @session {:client-id "A"}))))
@@ -406,8 +406,7 @@
     (runtime/commit-version!
      session
      (block-request c0 0 nil
-                    (str "(def op (premise-closure "
-                         "(network [x] [out] (-> x out)) :p 0))")))
+                    "(define op (premise-closure (network [x] x) :p 0))"))
     (let [first-candidate (-> @session
                               (block-model/block-by-index "A" 0)
                               :version-history first :definitions first)]
@@ -415,8 +414,7 @@
       (runtime/commit-version!
        session
        (block-request "00000000-0000-0000-0000-000000000004" 0 0
-                      (str "(def op (premise-closure "
-                           "(network [x] [out] (-> x out)) :q 1))")))
+                      "(define op (premise-closure (network [x] x) :q 1))"))
       (let [network (:program/net @session)
             old-state (net/network-cell-content
                        network
