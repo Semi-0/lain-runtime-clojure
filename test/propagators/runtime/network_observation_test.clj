@@ -77,6 +77,22 @@
             :node/outputs [b]}
            (:value prop-result)))))
 
+(deftest trace-neighbors-observes-extended-output-edges
+  (let [{:keys [net b p]} (id-network)
+        member (ids/new-node-id)
+        extended (nb/extend-propagator-outputs net p [member])
+        before (:value (apply-observer net (observation/neighbors-operator) p))
+        after (:value (apply-observer extended (observation/neighbors-operator) p))
+        reciprocal (:value (apply-observer extended
+                             (observation/neighbors-operator) member))]
+    ;; This is the same compound-valued primitive used by the Lain tracer.
+    (is (= [b] (:node/outputs before)))
+    (is (= #{b member} (set (:node/outputs after))))
+    (is (= [p] (:node/inputs reciprocal)))
+    (is (value/nothing? (net/network-cell-strongest extended member)))
+    (is (= #{b} (:outputs (get (net/net-graph net) p))))
+    (is (= (net/net-relationship net) (net/net-relationship extended)))))
+
 (deftest neighbors-orders-identities-deterministically
   (let [root (ids/new-node-id)
         targets [(ids/new-node-id)

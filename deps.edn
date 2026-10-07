@@ -1,10 +1,10 @@
 {:paths ["src"]
  :deps {io.github.Semi-0/lain-infrastructure
         {:git/url "https://github.com/Semi-0/lain-infrastructure.git"
-         :git/sha "6b031cf71df7a27a71e52c14cf1227904f637a13"}
+         :git/sha "12112d2bd937dd968f143bcd85f9656ed026ddb3"}
         io.github.Semi-0/lain-compiler
         {:git/url "https://github.com/Semi-0/lain-compiler.git"
-         :git/sha "b9806338dfeea418210733b748ebce38f23c561b"}
+         :git/sha "1e288c27e302521c665abf8d38f5eb8310a046c8"}
         meander/epsilon {:mvn/version "0.0.650"}}
  :aliases {:test {:extra-paths ["test" "dev"]
                   :main-opts ["-m" "run-tests"]}
